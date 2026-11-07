@@ -1,0 +1,39 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
+    <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE"/>
+    <queries>
+        <intent><action android:name="android.service.euicc.EuiccService"/></intent>
+        <intent><action android:name="android.telephony.euicc.action.MANAGE_EMBEDDED_SUBSCRIPTIONS"/></intent>
+        <package android:name="com.miui.euicc"/>
+        <package android:name="io.github.local.esimh4tester"/>
+    </queries>
+    <application
+        android:label="小米 eSIM 兼容助手"
+        android:allowBackup="false"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".LpaBridgeActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.telephony.euicc.action.START_EUICC_ACTIVATION"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="lpa"/>
+                <data android:scheme="LPA"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

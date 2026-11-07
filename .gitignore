@@ -1,0 +1,71 @@
+# Built-in Gradle files
+.gradle/
+build/
+**/build/
+
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+.navigation/
+local.properties
+.externalNativeBuild/
+.cxx/
+
+# Eclipse
+.project
+.classpath
+.settings/
+
+# Visual Studio Code
+.vscode/
+
+# Build artifacts & packages
+module/
+dist/
+bin/
+gen/
+*.apk
+!prebuilt/*.apk
+*.aab
+*.ap_
+*.dex
+
+# Keystores & Signing Keys
+*.jks
+*.keystore
+*.key
+*.p8
+*.p12
+*.pem
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.venv/
+env/
+venv/
+
+# Log & Temporary files
+/*.xml
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+crash-*.txt
+
+# OS-specific files
+Thumbs.db
+desktop.ini
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
