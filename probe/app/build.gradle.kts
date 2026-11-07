@@ -3,7 +3,7 @@ android {
     namespace = "io.github.local.esimh4probe"
     compileSdk = 36
     defaultConfig {
-        applicationId = "io.github.local.esimh4probe"
+        applicationId = "io.github.jabe1122.esimh4probe"
         minSdk = 33
         targetSdk = 35
         versionCode = 400

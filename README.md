@@ -170,7 +170,7 @@ work/esim-adapt/
 
 ### 第二步：配置 LSPosed 作用域
 1. 打开 LSPosed 管理器应用。
-2. 找到已安装的模块 **「小米 eSIM 兼容助手」**（`io.github.local.esimh4probe`）。
+2. 找到已安装的模块 **「HYPEROS4实体ESIM桥接」**（`io.github.jabe1122.esimh4probe`）。
 3. 勾选并确保以下作用域已启用：
    - `com.android.phone`（电话服务）
    - `com.miui.euicc`（小米 eSIM LPA）
@@ -379,7 +379,7 @@ work/esim-adapt/
 
 ### Step 2: Configure LSPosed Scopes
 1. Open the LSPosed Manager.
-2. Locate the installed **Xiaomi eSIM Compat Helper** (`io.github.local.esimh4probe`).
+2. Locate the installed **HYPEROS4实体ESIM桥接** (`io.github.jabe1122.esimh4probe`).
 3. Enable the module and select the following scopes:
    - `com.android.phone` (Phone Services)
    - `com.miui.euicc` (Xiaomi eSIM LPA)

@@ -164,11 +164,13 @@ sync_apk_if_needed() {
 }
 
 sync_tester_on() {
+  pm enable io.github.jabe1122.esimh4probe/io.github.local.esimh4probe.LpaBridgeActivity >/dev/null 2>&1
   pm enable io.github.local.esimh4probe/.LpaBridgeActivity >/dev/null 2>&1
   sync_apk_if_needed io.github.local.esimh4tester "$MODDIR/tester.apk" "$STATE/tester.sha256"
 }
 
 sync_tester_off() {
+  pm disable io.github.jabe1122.esimh4probe/io.github.local.esimh4probe.LpaBridgeActivity >/dev/null 2>&1
   pm disable io.github.local.esimh4probe/.LpaBridgeActivity >/dev/null 2>&1
   pm uninstall io.github.local.esimh4tester >/dev/null 2>&1
   rm -f "$STATE/tester.sha256"
@@ -243,7 +245,7 @@ MODDIR=$MODPATH
 save_originals || abort "Settings backup failed validation. Nothing will be changed."
 cp "$MODPATH/compat.apk" "$STATE/restore-helper.apk"
 chmod 600 "$STATE/restore-helper.apk"
-sync_apk_if_needed io.github.local.esimh4probe "$MODPATH/compat.apk" "$STATE/compat.sha256"
+sync_apk_if_needed io.github.jabe1122.esimh4probe "$MODPATH/compat.apk" "$STATE/compat.sha256"
 sync_apk_if_needed com.miui.euicc "$MODPATH/lpa.apk" "$STATE/lpa.sha256"
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 for script in common.sh action.sh post-fs-data.sh service.sh uninstall.sh diagnostics.sh restore.sh; do
@@ -284,7 +286,7 @@ while [ "$(getprop sys.boot_completed)" != 1 ] && [ "$count" -lt 180 ]; do
   count=$((count + 1))
 done
 [ "$(getprop sys.boot_completed)" = 1 ] || exit 0
-sync_apk_if_needed io.github.local.esimh4probe "$MODDIR/compat.apk" "$STATE/compat.sha256"
+sync_apk_if_needed io.github.jabe1122.esimh4probe "$MODDIR/compat.apk" "$STATE/compat.sha256"
 sync_apk_if_needed com.miui.euicc "$MODDIR/lpa.apk" "$STATE/lpa.sha256"
 read_mode
 if [ "$MODE" = on ] && [ "$(getprop sys.xiaomi_esim_h4.active)" = 1 ]; then
@@ -353,6 +355,7 @@ if [ ! -d "$MODDIR" ] || [ -f "$MODDIR/disable" ] || [ -f "$MODDIR/remove" ]; th
     esac
   fi
   setprop sys.xiaomi_esim_h4.active 0
+  pm disable io.github.jabe1122.esimh4probe/io.github.local.esimh4probe.LpaBridgeActivity >/dev/null 2>&1
   pm disable io.github.local.esimh4probe/.LpaBridgeActivity >/dev/null 2>&1
   pm uninstall io.github.local.esimh4tester >/dev/null 2>&1
   rm -f "$STATE/tester.sha256"
@@ -393,6 +396,7 @@ reset_property
 setprop sys.xiaomi_esim_h4.active 0
 rm -f /data/adb/service.d/xiaomi-esim-h4-restore.sh
 pm uninstall io.github.local.esimh4tester >/dev/null 2>&1
+pm uninstall io.github.jabe1122.esimh4probe >/dev/null 2>&1
 pm uninstall io.github.local.esimh4probe >/dev/null 2>&1
 pm uninstall com.miui.euicc >/dev/null 2>&1
 ''')
