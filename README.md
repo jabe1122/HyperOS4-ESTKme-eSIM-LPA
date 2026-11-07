@@ -1,5 +1,5 @@
-# HyperOS 4 Physical eSIM (ESTKme) Adaptation
 # 小米 HyperOS 4 实体 eSIM (ESTKme) 适配与桥接方案
+# HyperOS 4 Physical eSIM (ESTKme) Adaptation
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Android](https://img.shields.io/badge/Platform-HyperOS%204%20%7C%20Android%2015%2B%20(SDK%2035%2B)-green.svg)]()
@@ -10,17 +10,6 @@
 
 ## 目录 / Table of Contents
 
-- [English Documentation](#english-documentation)
-  - [Overview](#overview)
-  - [Core Adaptation Principles](#core-adaptation-principles)
-  - [Security Architecture & Safety Red Lines](#security-architecture--safety-red-lines)
-  - [Supported Devices & System Requirements](#supported-devices--system-requirements)
-  - [Repository Architecture](#repository-architecture)
-  - [Installation & Deployment Guide](#installation--deployment-guide)
-  - [Mock Testing Framework](#mock-testing-framework)
-  - [Building from Source](#building-from-source)
-  - [Disclaimers & Safety Notice](#disclaimers--safety-notice)
-  - [License](#license)
 - [中文说明文档](#中文说明文档)
   - [项目概览](#项目概览)
   - [ESTKme 实体卡适配核心原理](#estkme-实体卡适配核心原理)
@@ -32,7 +21,218 @@
   - [源码构建指南](#源码构建指南)
   - [安全须知与免责声明](#安全须知与免责声明)
   - [开源协议与参与贡献](#开源协议与参与贡献)
+- [English Documentation](#english-documentation)
+  - [Overview](#overview)
+  - [Core Adaptation Principles](#core-adaptation-principles)
+  - [Security Architecture & Safety Red Lines](#security-architecture--safety-red-lines)
+  - [Supported Devices & System Requirements](#supported-devices--system-requirements)
+  - [Repository Architecture](#repository-architecture)
+  - [Installation & Deployment Guide](#installation--deployment-guide)
+  - [Mock Testing Framework](#mock-testing-framework)
+  - [Building from Source](#building-from-source)
+  - [Disclaimers & Safety Notice](#disclaimers--safety-notice)
+  - [License](#license)
 
+---
+
+# 中文说明文档
+
+## 项目概览
+
+**HyperOS 4 实体 eSIM (ESTKme) 适配与桥接方案** 是一套面向 Xiaomi HyperOS 4（Android 15 / 16 / 17，API 35+）的开源系统级兼容层与桥接模块，专门解决可插拔实体 eSIM 卡（如 **ESTKme** 系列卡片）在国行双物理卡槽小米机型上无法原生使用官方系统 LPA 的难题。
+
+在小米 MIX Flip 2（`bixi`）等机型上，官方固件未开放对卡槽2中可插拔 eUICC 实体卡的原生支持。本项目实现：
+1. **完整原生 eSIM 系统能力**：免除修改官方 LPA 签名，系统底层挂载声明 `android.hardware.telephony.euicc` 特性，直接配合提取自小米旗舰机型的原版 `MIUIEsimLPA.apk`（v4.1.0.1）工作。
+2. **透明 OMAPI `SEService` 桥接**：将上层框架下发的 APDU 命令无缝转发至 SIM2 读卡器，彻底突破基带 RIL 通道限制。
+3. **Fail-Closed 实体卡安全守护（`CardTypeGuard`）**：严格进行 ISD-R AID 探测，在插入普通 SIM 卡时立即自动关闭 eSIM 模式，杜绝误操作。
+4. **卡槽1射频与网络彻底隔离**：拦截官方 LPA 面向板载 eSIM 设计的 GPIO 硬件天线切换逻辑，确保主卡（SIM1）移动网络、通话及 VoLTE 完全不受干扰。
+5. **零专有代码残留**：采用独立现代清晰的架构设计，完全不包含第三方专有代码片段。
+
+---
+
+## ESTKme 实体卡适配核心原理
+
+### 1. 透明 OMAPI `SEService` SIM2 读卡器桥接
+在 HyperOS 4 系统下，系统 Telephony RIL 守护进程在面对可插拔卡槽时往往会拒绝建立 eUICC 逻辑通道。本项目通过 `CompatModule` 拦截底层 APDU 通道交互，动态桥接至 Android 标准 Open Mobile API (`android.se.omapi.SEService`)：
+- 指定连接底层 **`SIM2`** 智能卡读卡器；
+- 分配从 **`12000+`** 开始的独立虚拟逻辑通道 ID（如 12000、12001）；
+- 将虚拟通道与 OMAPI 底层 Channel 实例严格同步管理，杜绝通道死锁与句柄泄漏。
+
+```
++--------------------------------------------------------------------+
+|       Android 系统框架 / 第三方运营商应用 / 官方 MIUIEsimLPA.apk     |
++--------------------------------------------------------------------+
+                                  |
+                                  v
++--------------------------------------------------------------------+
+|          CompatModule (LSPosed 模块: com.android.phone / euicc)    |
+|  - APDU 通道路由器与虚拟通道池 (12000+)                              |
++--------------------------------------------------------------------+
+           |                                         |
+           | (RIL 通道未就绪时自动降级)               | (普通 UICC 通道)
+           v                                         v
++-----------------------------+           +--------------------------+
+|  OMAPI SEService 桥接层     |           | 原生 Telephony RIL       |
+|  读卡器: "SIM2"             |           | 物理卡槽 0 (SIM1 主卡)   |
++-----------------------------+           +--------------------------+
+           |                                         |
+           v                                         v
++-----------------------------+           +--------------------------+
+| ESTKme 可插拔实体 eSIM 卡   |           | 用户物理 SIM1 电话卡     |
+| 物理卡槽 2 (安全保护)       |           | 绝对隔离，保持常开       |
++-----------------------------+           +--------------------------+
+```
+
+### 2. SGP.22 ISD-R AID 逻辑通道管理
+GSMA SGP.22 规范定义了与 eUICC 根安全域（ISD-R）通信的应用标识符：
+```
+A0 00 00 05 59 10 10 FF FF FF FF 89 00 00 01 00
+```
+`CompatModule` 负责精细化的通道管理：
+- 使用 P2 参数 `0x00` 打开逻辑通道；
+- 发送 `GET DATA [BF 3E]` 指令并进行 ASN.1 DER 解码，精准提取卡片 32 位 EID（Tag `0x5A`）；
+- 在基带状态从 `NOT_READY` 转换到 `LOADED` 过程中具备指数退避与安全重试能力。
+
+### 3. Fail-Closed 实体卡类型安全守护（`CardTypeGuard`）
+为防止用户在 SIM2 插回普通手机卡时系统产生混乱，`CardTypeGuard` 实现了严格的**失效关闭**（Fail-Closed）安全策略：
+- 监听卡槽状态变化广播（`ACTION_SIM_CARD_STATE_CHANGED`）；
+- 异步向 SIM2 发送 ISD-R AID 握手探测；
+- 若卡片无法响应 ISD-R 或为非 eUICC 普通 SIM 卡，`CardTypeGuard` 立即判定 `eUICC = false`，禁止系统执行任何 eSIM 相关逻辑，保持 SIM2 原生 UICC 通信正常；
+- **隐私保护原则**：系统 Secure 设置中绝不存储明文 ICCID 或 EID，仅存储 SHA-256 校验摘要（`xiaomi_esim_h4_verified_iccid`、`xiaomi_esim_h4_verified_eid`）。
+
+### 4. SIM1 射频与网络彻底隔离（拦截 OEM GPIO 切换）
+小米官方板载 eSIM 逻辑在激活时会通过底层硬件 GPIO 切断物理 SIM1 的射频通路。对于双实体卡槽机型，这会导致用户的 SIM1 主卡瞬间断网无服务。
+`CompatModule` 对 `com.android.phone` 与 `com.miui.euicc` 进行了深度拦截：
+- Hook `QcMiuiEsimManager`、`MiuiPhoneInterfaceManager` 以及 `XmLPAService`；
+- 拦截并短路 OEM GPIO/RF 切换方法（`setSimType`、`switchSlot`、`isSupportEsim`）；
+- 确保 SIM1 主卡在 eSIM 启停、配置切换、EID 读取过程中始终保持 5G/4G/VoLTE 稳定连接，不受丝毫干扰。
+
+---
+
+## 安全架构与测试红线约束
+
+### 实体在用 ESTKme 卡安全红线
+针对插有真实在用 eSIM profile 的 ESTKme 卡片，本项目在设计之初即设立了严格的**测试安全红线**：
+
+| 红线规则 | 实现约束 |
+|---|---|
+| **严禁未经授权写卡** | 任何携带 `BF 36`（LoadBoundProfilePackage）或 `BF 34`（EuiccMemoryReset）的 APDU 指令被三层校验阻断，无法下发至物理卡闪存。 |
+| **严禁删除卡内配置** | 阻断 `BF 33`（DeleteProfile）标签，避免在测试中误删用户商业套餐。 |
+| **非破坏性验证** | 所有下载验证流程全部定向至本地模拟域名 `test.esim.local`，仅在内存层走通流程。 |
+
+---
+
+## 支持设备与系统版本
+
+- **验证基准机型**：Xiaomi MIX Flip 2（代号 `bixi`，测试序列号 `f3d6d3d0`）。
+- **支持操作系统**：Xiaomi HyperOS 4（基于 Android 15、Android 16、Android 17 / API 35+）。
+- **通用机型支持**：代码中已消除所有硬编码设备代号，适配所有 HyperOS 4 双卡小米机型。
+- **实体 eSIM 卡**：ESTKme 及其兼容系列可插拔实体 eUICC（必须放置在 **SIM 卡槽 2**）。
+
+---
+
+## 仓库与模块架构
+
+```
+work/esim-adapt/
+├── .gitignore                      # Git 忽略配置（忽略构建缓存、私钥等）
+├── LICENSE                         # Apache 2.0 开源协议
+├── README.md                       # 中英双语完整技术文档
+├── build_module.py                 # Magisk/KernelSU 刷机包自动化打包脚本
+├── finalize_release.py             # 发布完整性校验脚本（10 项发布断言）
+├── prebuilt/
+│   └── MIUIEsimLPA.apk             # 提取自官方 HyperOS 4 固件的未修改原版 LPA (v4.1.0.1)
+├── probe/                          # Android Studio Gradle 工程
+│   ├── app/                        # LSPosed 核心桥接模块 (io.github.local.esimh4probe)
+│   │   └── src/main/java/io/github/local/esimh4probe/
+│   │       ├── CompatModule.java       # LibXposed 入口与 APDU 通道路由
+│   │       ├── CardTypeGuard.java      # Fail-closed ISD-R AID 探测与防护
+│   │       ├── EuiccCardReader.java    # OMAPI 读卡器交互与 ASN.1 EID 解码
+│   │       ├── Sim2Subscription.java   # 卡2订阅映射与状态同步
+│   │       ├── Sim2Control.java        # CLI 诊断与状态辅助工具
+│   │       ├── LpaBridgeActivity.java  # LPA 扫码与 Intent 桥接
+│   │       └── MainActivity.java       # 模块本地诊断界面
+│   └── tester/                     # 独立安全模拟测试应用 (io.github.local.esimh4tester)
+│       └── src/main/java/io/github/local/esimh4tester/
+│           └── TesterActivity.java     # 模拟运营商下载与弹窗验证 Activity
+└── outputs/                        # 构建发布产物目录（ZIP 包、APK、SHA256 校验单）
+```
+
+---
+
+## 安装与部署指南
+
+### 第一步：刷入 Magisk / KernelSU 模块
+1. 前往 Release 发布产物目录下载 `XiaomiEsimLPA-HyperOS4-bixi-v0.4.0.zip`。
+2. 打开 KernelSU / Magisk / APatch 管理器，选择从本地安装刷入该 ZIP。
+3. 模块安装脚本会自动对系统当前状态进行只读备份，存放于 `/data/adb/xiaomi-esim-hyperos4/`（权限 `0700`）。
+4. **重启手机**。
+
+### 第二步：配置 LSPosed 作用域
+1. 打开 LSPosed 管理器应用。
+2. 找到已安装的模块 **「小米 eSIM 兼容助手」**（`io.github.local.esimh4probe`）。
+3. 勾选并确保以下作用域已启用：
+   - `com.android.phone`（电话服务）
+   - `com.miui.euicc`（小米 eSIM LPA）
+4. 请勿勾选无关系统应用。
+
+### 第三步：插入 ESTKme 并开启功能
+1. 将 ESTKme 卡放入手机 **SIM 卡槽 2**。
+2. 打开 KernelSU / Magisk → 进入本模块界面 → 点击 **「操作」**（Action）切换为开启。
+3. 重启手机。
+4. 进入系统设置 →「双卡与移动网络」→「eSIM」，此时系统即可正常读取 ESTKme 实体卡 EID 并管理配置。
+
+---
+
+## 模拟测试框架与非破坏性验证
+
+为了让开发者能够安全地验证全部 LPA 交互流程，模块附带了独立测试应用 `io.github.local.esimh4tester`：
+- 使用模拟激活码：`LPA:1$test.esim.local$MOCK_ACTIVATION_CODE`。
+- `TesterActivity` 调用 `EuiccManager.downloadSubscription` 后：
+  1. `CompatModule` 在 `EuiccController` 层拦截该域名请求；
+  2. `XmLPAService` 捕获模拟请求并唤起原厂一键授权弹窗 `DownloadConfirmDialogActivity`；
+  3. `DpDownloadOperation` 返回模拟安装成功；
+  4. **物理卡内的所有真实在用 eSIM profile 100% 保持原样，不发生任何闪存写入或擦除。**
+
+---
+
+## 源码构建指南
+
+### 构建环境要求
+- JDK 21 (`jdk-21.0.13+9` 或更高版本)
+- Android SDK (API 35+ / SDK Build Tools 36.0.0)
+- Gradle 8.11.1
+- Python 3.10+
+
+### 一键构建与发布
+```bash
+# 1. 编译模块 APK 与测试应用 APK
+cd work/esim-adapt
+gradle -p probe :app:assembleDebug :tester:assembleDebug
+
+# 2. 自动化打包 KernelSU / Magisk 模块 ZIP
+python build_module.py
+
+# 3. 运行 10 项发布断言完整性校验并生成 SHA256SUMS.txt
+python finalize_release.py
+```
+
+---
+
+## 安全须知与免责声明
+
+1. **Root 风险声明**：本模块需要 Root 权限以及 LSPosed 框架支持。请务必了解玩机风险。
+2. **商标与版权说明**：Xiaomi、HyperOS、MIUI、ESTKme、GSMA 等商标及产品名称归其各自所有者拥有。本项目为开源社区兼容性适配方案，与小米公司或 ESTKme 官方无隶属关系。
+3. **免责保证**：本项目按 Apache License 2.0 协议发布，作者对任何由于刷机或使用本模块产生的数据丢失或硬件故障不承担法律责任。
+
+---
+
+## 开源协议与参与贡献
+
+本项目基于 **Apache License 2.0** 许可证开源。详细条款请参阅 [LICENSE](LICENSE) 文件。
+欢迎提交 Issue 与 Pull Request 共同改进 HyperOS 实体 eSIM 适配生态！
+
+---
 ---
 
 # English Documentation
@@ -250,203 +450,3 @@ You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 ```
-
----
----
-
-# 中文说明文档
-
-## 项目概览
-
-**HyperOS 4 实体 eSIM (ESTKme) 适配与桥接方案** 是一套面向 Xiaomi HyperOS 4（Android 15 / 16 / 17，API 35+）的开源系统级兼容层与桥接模块，专门解决可插拔实体 eSIM 卡（如 **ESTKme** 系列卡片）在国行双物理卡槽小米机型上无法原生使用官方系统 LPA 的难题。
-
-在小米 MIX Flip 2（`bixi`）等机型上，官方固件未开放对卡槽2中可插拔 eUICC 实体卡的原生支持。本项目实现：
-1. **完整原生 eSIM 系统能力**：免除修改官方 LPA 签名，系统底层挂载声明 `android.hardware.telephony.euicc` 特性，直接配合提取自小米旗舰机型的原版 `MIUIEsimLPA.apk`（v4.1.0.1）工作。
-2. **透明 OMAPI `SEService` 桥接**：将上层框架下发的 APDU 命令无缝转发至 SIM2 读卡器，彻底突破基带 RIL 通道限制。
-3. **Fail-Closed 实体卡安全守护（`CardTypeGuard`）**：严格进行 ISD-R AID 探测，在插入普通 SIM 卡时立即自动关闭 eSIM 模式，杜绝误操作。
-4. **卡槽1射频与网络彻底隔离**：拦截官方 LPA 面向板载 eSIM 设计的 GPIO 硬件天线切换逻辑，确保主卡（SIM1）移动网络、通话及 VoLTE 完全不受干扰。
-5. **零专有代码残留**：采用独立现代清晰的架构设计，完全不包含第三方专有代码片段。
-
----
-
-## ESTKme 实体卡适配核心原理
-
-### 1. 透明 OMAPI `SEService` SIM2 读卡器桥接
-在 HyperOS 4 系统下，系统 Telephony RIL 守护进程在面对可插拔卡槽时往往会拒绝建立 eUICC 逻辑通道。本项目通过 `CompatModule` 拦截底层 APDU 通道交互，动态桥接至 Android 标准 Open Mobile API (`android.se.omapi.SEService`)：
-- 指定连接底层 **`SIM2`** 智能卡读卡器；
-- 分配从 **`12000+`** 开始的独立虚拟逻辑通道 ID（如 12000、12001）；
-- 将虚拟通道与 OMAPI 底层 Channel 实例严格同步管理，杜绝通道死锁与句柄泄漏。
-
-```
-+--------------------------------------------------------------------+
-|       Android 系统框架 / 第三方运营商应用 / 官方 MIUIEsimLPA.apk     |
-+--------------------------------------------------------------------+
-                                  |
-                                  v
-+--------------------------------------------------------------------+
-|          CompatModule (LSPosed 模块: com.android.phone / euicc)    |
-|  - APDU 通道路由器与虚拟通道池 (12000+)                              |
-+--------------------------------------------------------------------+
-           |                                         |
-           | (RIL 通道未就绪时自动降级)               | (普通 UICC 通道)
-           v                                         v
-+-----------------------------+           +--------------------------+
-|  OMAPI SEService 桥接层     |           | 原生 Telephony RIL       |
-|  读卡器: "SIM2"             |           | 物理卡槽 0 (SIM1 主卡)   |
-+-----------------------------+           +--------------------------+
-           |                                         |
-           v                                         v
-+-----------------------------+           +--------------------------+
-| ESTKme 可插拔实体 eSIM 卡   |           | 用户物理 SIM1 电话卡     |
-| 物理卡槽 2 (安全保护)       |           | 绝对隔离，保持常开       |
-+-----------------------------+           +--------------------------+
-```
-
-### 2. SGP.22 ISD-R AID 逻辑通道管理
-GSMA SGP.22 规范定义了与 eUICC 根安全域（ISD-R）通信的应用标识符：
-```
-A0 00 00 05 59 10 10 FF FF FF FF 89 00 00 01 00
-```
-`CompatModule` 负责精细化的通道管理：
-- 使用 P2 参数 `0x00` 打开逻辑通道；
-- 发送 `GET DATA [BF 3E]` 指令并进行 ASN.1 DER 解码，精准提取卡片 32 位 EID（Tag `0x5A`）；
-- 在基带状态从 `NOT_READY` 转换到 `LOADED` 过程中具备指数退避与安全重试能力。
-
-### 3. Fail-Closed 实体卡类型安全守护（`CardTypeGuard`）
-为防止用户在 SIM2 插回普通手机卡时系统产生混乱，`CardTypeGuard` 实现了严格的**失效关闭**（Fail-Closed）安全策略：
-- 监听卡槽状态变化广播（`ACTION_SIM_CARD_STATE_CHANGED`）；
-- 异步向 SIM2 发送 ISD-R AID 握手探测；
-- 若卡片无法响应 ISD-R 或为非 eUICC 普通 SIM 卡，`CardTypeGuard` 立即判定 `eUICC = false`，禁止系统执行任何 eSIM 相关逻辑，保持 SIM2 原生 UICC 通信正常；
-- **隐私保护原则**：系统 Secure 设置中绝不存储明文 ICCID 或 EID，仅存储 SHA-256 校验摘要（`xiaomi_esim_h4_verified_iccid`、`xiaomi_esim_h4_verified_eid`）。
-
-### 4. SIM1 射频与网络彻底隔离（拦截 OEM GPIO 切换）
-小米官方板载 eSIM 逻辑在激活时会通过底层硬件 GPIO 切断物理 SIM1 的射频通路。对于双实体卡槽机型，这会导致用户的 SIM1 主卡瞬间断网无服务。
-`CompatModule` 对 `com.android.phone` 与 `com.miui.euicc` 进行了深度拦截：
-- Hook `QcMiuiEsimManager`、`MiuiPhoneInterfaceManager` 以及 `XmLPAService`；
-- 拦截并短路 OEM GPIO/RF 切换方法（`setSimType`、`switchSlot`、`isSupportEsim`）；
-- 确保 SIM1 主卡在 eSIM 启停、配置切换、EID 读取过程中始终保持 5G/4G/VoLTE 稳定连接，不受丝毫干扰。
-
----
-
-## 安全架构与测试红线约束
-
-### 实体在用 ESTKme 卡安全红线
-针对插有真实在用 eSIM profile 的 ESTKme 卡片，本项目在设计之初即设立了严格的**测试安全红线**：
-
-| 红线规则 | 实现约束 |
-|---|---|
-| **严禁未经授权写卡** | 任何携带 `BF 36`（LoadBoundProfilePackage）或 `BF 34`（EuiccMemoryReset）的 APDU 指令被三层校验阻断，无法下发至物理卡闪存。 |
-| **严禁删除卡内配置** | 阻断 `BF 33`（DeleteProfile）标签，避免在测试中误删用户商业套餐。 |
-| **非破坏性验证** | 所有下载验证流程全部定向至本地模拟域名 `test.esim.local`，仅在内存层走通流程。 |
-
----
-
-## 支持设备与系统版本
-
-- **验证基准机型**：Xiaomi MIX Flip 2（代号 `bixi`，测试序列号 `f3d6d3d0`）。
-- **支持操作系统**：Xiaomi HyperOS 4（基于 Android 15、Android 16、Android 17 / API 35+）。
-- **通用机型支持**：代码中已消除所有硬编码设备代号，适配所有 HyperOS 4 双卡小米机型。
-- **实体 eSIM 卡**：ESTKme 及其兼容系列可插拔实体 eUICC（必须放置在 **SIM 卡槽 2**）。
-
----
-
-## 仓库与模块架构
-
-```
-work/esim-adapt/
-├── .gitignore                      # Git 忽略配置（忽略构建缓存、私钥等）
-├── LICENSE                         # Apache 2.0 开源协议
-├── README.md                       # 中英双语完整技术文档
-├── build_module.py                 # Magisk/KernelSU 刷机包自动化打包脚本
-├── finalize_release.py             # 发布完整性校验脚本（10 项发布断言）
-├── prebuilt/
-│   └── MIUIEsimLPA.apk             # 提取自官方 HyperOS 4 固件的未修改原版 LPA (v4.1.0.1)
-├── probe/                          # Android Studio Gradle 工程
-│   ├── app/                        # LSPosed 核心桥接模块 (io.github.local.esimh4probe)
-│   │   └── src/main/java/io/github/local/esimh4probe/
-│   │       ├── CompatModule.java       # LibXposed 入口与 APDU 通道路由
-│   │       ├── CardTypeGuard.java      # Fail-closed ISD-R AID 探测与防护
-│   │       ├── EuiccCardReader.java    # OMAPI 读卡器交互与 ASN.1 EID 解码
-│   │       ├── Sim2Subscription.java   # 卡2订阅映射与状态同步
-│   │       ├── Sim2Control.java        # CLI 诊断与状态辅助工具
-│   │       ├── LpaBridgeActivity.java  # LPA 扫码与 Intent 桥接
-│   │       └── MainActivity.java       # 模块本地诊断界面
-│   └── tester/                     # 独立安全模拟测试应用 (io.github.local.esimh4tester)
-│       └── src/main/java/io/github/local/esimh4tester/
-│           └── TesterActivity.java     # 模拟运营商下载与弹窗验证 Activity
-└── outputs/                        # 构建发布产物目录（ZIP 包、APK、SHA256 校验单）
-```
-
----
-
-## 安装与部署指南
-
-### 第一步：刷入 Magisk / KernelSU 模块
-1. 前往 Release 发布产物目录下载 `XiaomiEsimLPA-HyperOS4-bixi-v0.4.0.zip`。
-2. 打开 KernelSU / Magisk / APatch 管理器，选择从本地安装刷入该 ZIP。
-3. 模块安装脚本会自动对系统当前状态进行只读备份，存放于 `/data/adb/xiaomi-esim-hyperos4/`（权限 `0700`）。
-4. **重启手机**。
-
-### 第二步：配置 LSPosed 作用域
-1. 打开 LSPosed 管理器应用。
-2. 找到已安装的模块 **「小米 eSIM 兼容助手」**（`io.github.local.esimh4probe`）。
-3. 勾选并确保以下作用域已启用：
-   - `com.android.phone`（电话服务）
-   - `com.miui.euicc`（小米 eSIM LPA）
-4. 请勿勾选无关系统应用。
-
-### 第三步：插入 ESTKme 并开启功能
-1. 将 ESTKme 卡放入手机 **SIM 卡槽 2**。
-2. 打开 KernelSU / Magisk → 进入本模块界面 → 点击 **「操作」**（Action）切换为开启。
-3. 重启手机。
-4. 进入系统设置 →「双卡与移动网络」→「eSIM」，此时系统即可正常读取 ESTKme 实体卡 EID 并管理配置。
-
----
-
-## 模拟测试框架与非破坏性验证
-
-为了让开发者能够安全地验证全部 LPA 交互流程，模块附带了独立测试应用 `io.github.local.esimh4tester`：
-- 使用模拟激活码：`LPA:1$test.esim.local$MOCK_ACTIVATION_CODE`。
-- `TesterActivity` 调用 `EuiccManager.downloadSubscription` 后：
-  1. `CompatModule` 在 `EuiccController` 层拦截该域名请求；
-  2. `XmLPAService` 捕获模拟请求并唤起原厂一键授权弹窗 `DownloadConfirmDialogActivity`；
-  3. `DpDownloadOperation` 返回模拟安装成功；
-  4. **物理卡内的所有真实在用 eSIM profile 100% 保持原样，不发生任何闪存写入或擦除。**
-
----
-
-## 源码构建指南
-
-### 构建环境要求
-- JDK 21 (`jdk-21.0.13+9` 或更高版本)
-- Android SDK (API 35+ / SDK Build Tools 36.0.0)
-- Gradle 8.11.1
-- Python 3.10+
-
-### 一键构建与发布
-```bash
-# 1. 编译模块 APK 与测试应用 APK
-cd work/esim-adapt
-gradle -p probe :app:assembleDebug :tester:assembleDebug
-
-# 2. 自动化打包 KernelSU / Magisk 模块 ZIP
-python build_module.py
-
-# 3. 运行 10 项发布断言完整性校验并生成 SHA256SUMS.txt
-python finalize_release.py
-```
-
----
-
-## 安全须知与免责声明
-
-1. **Root 风险声明**：本模块需要 Root 权限以及 LSPosed 框架支持。请务必了解玩机风险。
-2. **商标与版权说明**：Xiaomi、HyperOS、MIUI、ESTKme、GSMA 等商标及产品名称归其各自所有者拥有。本项目为开源社区兼容性适配方案，与小米公司或 ESTKme 官方无隶属关系。
-3. **免责保证**：本项目按 Apache License 2.0 协议发布，作者对任何由于刷机或使用本模块产生的数据丢失或硬件故障不承担法律责任。
-
----
-
-## 开源协议与参与贡献
-
-本项目基于 **Apache License 2.0** 许可证开源。详细条款请参阅 [LICENSE](LICENSE) 文件。
-欢迎提交 Issue 与 Pull Request 共同改进 HyperOS 实体 eSIM 适配生态！
