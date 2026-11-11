@@ -9,11 +9,12 @@
     </queries>
     <application
         android:label="HYPEROS4实体ESIM桥接"
+        android:description="@string/xposed_description"
         android:allowBackup="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <meta-data
             android:name="xposeddescription"
-            android:value="小米 HyperOS 4 实体可插拔 eSIM (ESTKme) OMAPI SIM2 桥接与官方系统 LPA 兼容模块"/>
+            android:value="@string/xposed_description"/>
         <meta-data
             android:name="xposedscope"
             android:resource="@array/xposed_scope"/>

@@ -4,8 +4,10 @@ import android.app.Activity;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.telephony.euicc.DownloadableSubscription;
 import android.widget.Toast;
 
 /**
@@ -16,6 +18,8 @@ public final class LpaBridgeActivity extends Activity {
     private static final String LPA_PACKAGE = "com.miui.euicc";
     private static final String ACTIVE_STATUS_ACTIVITY = "com.miui.euicc.ui.active.ActiveStatusActivity";
     private static final String CAPTURE_ACTIVITY = "com.miui.euicc.ui.active.CaptureActivity";
+    private static final String EXTRA_DOWNLOADABLE_SUB =
+            "android.telephony.euicc.extra.EMBEDDED_SUBSCRIPTION_DOWNLOADABLE_SUBSCRIPTION";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -23,7 +27,10 @@ public final class LpaBridgeActivity extends Activity {
         try {
             int cardType = Settings.Secure.getInt(getContentResolver(), CardTypeGuard.KEY_CARD_TYPE, 0);
             if (!EuiccCardReader.isModuleActive() || cardType != 1) {
-                Toast.makeText(this, "卡槽2未检测到可用eSIM卡或模块未启用", Toast.LENGTH_SHORT).show();
+                String msg = (EuiccCardReader.isModuleActive() && cardType == -1)
+                        ? "正在识别卡槽2中的SIM卡类型，请稍候重试"
+                        : "卡槽2未检测到可用eSIM卡或模块未启用";
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
                 setResult(Activity.RESULT_CANCELED);
                 return;
             }
@@ -50,6 +57,7 @@ public final class LpaBridgeActivity extends Activity {
         }
     }
 
+    @SuppressWarnings("deprecation")
     private static String extractActivationCode(Intent intent) {
         if (intent == null) return null;
         Uri data = intent.getData();
@@ -66,6 +74,18 @@ public final class LpaBridgeActivity extends Activity {
         extra = intent.getStringExtra(Intent.EXTRA_TEXT);
         if (isActivationCode(extra)) {
             return extra.trim();
+        }
+        try {
+            DownloadableSubscription sub = Build.VERSION.SDK_INT >= 33
+                    ? intent.getParcelableExtra(EXTRA_DOWNLOADABLE_SUB, DownloadableSubscription.class)
+                    : (DownloadableSubscription) intent.getParcelableExtra(EXTRA_DOWNLOADABLE_SUB);
+            if (sub != null) {
+                String encoded = sub.getEncodedActivationCode();
+                if (encoded != null && !encoded.trim().isEmpty()) {
+                    return encoded.trim();
+                }
+            }
+        } catch (Throwable ignored) {
         }
         return null;
     }

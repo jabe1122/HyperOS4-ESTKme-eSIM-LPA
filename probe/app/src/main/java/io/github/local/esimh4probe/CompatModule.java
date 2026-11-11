@@ -1,5 +1,6 @@
 package io.github.local.esimh4probe;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.Application;
 import android.app.Instrumentation;
@@ -7,7 +8,9 @@ import android.app.PendingIntent;
 import android.content.ComponentName;
 import android.content.ContentProvider;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.Intent;
+import android.content.ServiceConnection;
 import android.content.res.Resources;
 import android.os.Binder;
 import android.os.Build;
@@ -20,6 +23,7 @@ import android.se.omapi.Channel;
 import android.se.omapi.Reader;
 import android.se.omapi.SEService;
 import android.se.omapi.Session;
+import android.telephony.SubscriptionInfo;
 import android.telephony.TelephonyManager;
 import android.telephony.UiccCardInfo;
 import android.telephony.euicc.DownloadableSubscription;
@@ -27,6 +31,7 @@ import android.util.Log;
 import android.widget.Toast;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
+import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -40,16 +45,20 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
- * LSPosed compatibility module for Xiaomi MIX Flip 2 (bixi, OS4.0.0.11.XOHCNXM, Android 17 / SDK 37)
- * with a removable eUICC (ESTKme) in physical Slot 2 (SIM2).
+ * LSPosed compatibility module for Xiaomi HyperOS 4 devices (e.g. MIX Flip 2 / bixi,
+ * REDMI K90 Pro Max / myron, Android 15–17 / SDK 35+) with a removable eUICC
+ * (ESTKme, EasyEUICC / 小白卡 / JoyTel / 9eSIM / Xesim / 5ber) in physical Slot 2 (SIM2).
  *
- * Isolates OEM soldered-eSIM GPIO/radio mux switching in com.android.phone, exposes verified SIM2
- * as default eUICC cardId 1, and adapts Xiaomi MIUIEsimLPA v4.1.0.1 to communicate with SIM2 via OMAPI.
+ * Isolates OEM soldered-eSIM GPIO/radio mux switching in com.android.phone, bridges SIM2's
+ * native or synthetic eUICC cardId cleanly across single-port and MEP-configured ROMs,
+ * supports empty / all-profiles-disabled cards, and adapts Xiaomi MIUIEsimLPA to communicate
+ * with SIM2 via dual-channel OMAPI + RIL with ISO-7816-4 61XX/6CXX APDU handling.
  */
 public final class CompatModule extends XposedModule {
     private static final String TAG = "EsimH4Compat";
@@ -57,6 +66,8 @@ public final class CompatModule extends XposedModule {
     private static final String MOCK_DOMAIN = "test.esim.local";
 
     private static final ThreadLocal<Boolean> IN_GET_CARDS = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<Boolean> IN_DIRECT_RIL = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<Boolean> IN_RAW_PORT_CHECK = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final Method CURRENT_APP_METHOD;
 
     static {
@@ -93,6 +104,82 @@ public final class CompatModule extends XposedModule {
             }
         }
         return currentApp();
+    }
+
+    private static String stripSpaces(String s) {
+        int len = s.length();
+        StringBuilder sb = new StringBuilder(len);
+        for (int i = 0; i < len; i++) {
+            char c = s.charAt(i);
+            if (!Character.isWhitespace(c) && c != '\u00A0') {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    private static CharSequence rewriteSim2EsimText(CharSequence original) {
+        if (original == null) return null;
+        String text = original.toString();
+        if (text.indexOf("eSIM") < 0 && text.indexOf("ESIM") < 0) {
+            return original;
+        }
+        String compact = stripSpaces(text);
+        if ("打开后eSIM将替换SIM卡2".equals(compact)) {
+            return "与卡槽2中的eSIM卡同步开启或关闭";
+        }
+        if (compact.contains("关闭eSIM并切换至SIM卡2")) {
+            return "关闭eSIM将同时停用卡槽2中的eSIM卡。是否关闭？";
+        }
+        if (compact.contains("开启eSIM") && compact.contains("SIM卡2")
+                && (compact.contains("关闭") || compact.contains("不可用") || compact.contains("停用"))) {
+            return "开启eSIM将同时启用卡槽2中的eSIM卡。是否开启？";
+        }
+        return original;
+    }
+
+    private static int resolveSyntheticSlot1CardId(Iterable<?> cards) {
+        int candidate = 1;
+        if (cards == null) return candidate;
+        while (true) {
+            boolean collision = false;
+            for (Object item : cards) {
+                if (item instanceof UiccCardInfo) {
+                    UiccCardInfo c = (UiccCardInfo) item;
+                    if (c.getPhysicalSlotIndex() != 1 && c.getCardId() == candidate) {
+                        collision = true;
+                        break;
+                    }
+                }
+            }
+            if (!collision) return candidate;
+            candidate++;
+        }
+    }
+
+    private static int resolveSlot1CardId(Context ctx) {
+        if (ctx == null) return 1;
+        boolean prevInGetCards = IN_GET_CARDS.get();
+        IN_GET_CARDS.set(true);
+        try {
+            TelephonyManager tm = ctx.getSystemService(TelephonyManager.class);
+            if (tm != null) {
+                List<UiccCardInfo> cards = tm.getUiccCardsInfo();
+                if (cards != null) {
+                    for (UiccCardInfo card : cards) {
+                        if (card != null && card.getPhysicalSlotIndex() == 1) {
+                            int nativeId = card.getCardId();
+                            return nativeId >= 0 ? nativeId : resolveSyntheticSlot1CardId(cards);
+                        }
+                    }
+                    return resolveSyntheticSlot1CardId(cards);
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            IN_GET_CARDS.set(prevInGetCards);
+        }
+        return 1;
     }
 
     private static boolean isCompatibleEnvironment(PackageReadyParam param) {
@@ -180,19 +267,17 @@ public final class CompatModule extends XposedModule {
         hook(Resources.class.getDeclaredMethod("getText", int.class)).intercept(chain -> {
             Object original = chain.proceed();
             if (!active() || !(original instanceof CharSequence)) return original;
-            String text = original.toString();
-            if ("打开后eSIM将替换SIM卡2".equals(text)) {
-                return "与卡槽2中的eSIM卡同步开启或关闭";
-            }
-            if (text.contains("关闭eSIM并切换至SIM卡2")) {
-                return "关闭eSIM将同时停用卡槽2中的eSIM卡。是否关闭？";
-            }
-            if (text.contains("开启eSIM") && text.contains("SIM卡2")
-                    && (text.contains("关闭") || text.contains("不可用"))) {
-                return "开启eSIM将同时启用卡槽2中的eSIM卡。是否开启？";
-            }
-            return original;
+            return rewriteSim2EsimText((CharSequence) original);
         });
+
+        try {
+            hook(Resources.class.getDeclaredMethod("getText", int.class, CharSequence.class)).intercept(chain -> {
+                Object original = chain.proceed();
+                if (!active() || !(original instanceof CharSequence)) return original;
+                return rewriteSim2EsimText((CharSequence) original);
+            });
+        } catch (Throwable ignored) {
+        }
 
         Set<Method> hookedMethods = new HashSet<>();
         String[] esimClasses = {
@@ -225,8 +310,22 @@ public final class CompatModule extends XposedModule {
                         if (ctx == null || !CardTypeGuard.isEuicc(ctx)) return false;
                         if (!checkActiveState) return true;
                         TelephonyManager tm = ctx.getSystemService(TelephonyManager.class);
-                        boolean ready = tm != null && tm.getSimState(1) == TelephonyManager.SIM_STATE_READY;
-                        return ready && Settings.Secure.getInt(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, 0) == 1;
+                        int simState = tm != null ? tm.getSimState(1) : TelephonyManager.SIM_STATE_UNKNOWN;
+                        if (simState == TelephonyManager.SIM_STATE_ABSENT
+                                || simState == TelephonyManager.SIM_STATE_UNKNOWN) {
+                            return false;
+                        }
+                        if (Settings.Secure.getInt(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, 0) != 1) {
+                            return false;
+                        }
+                        if (simState == TelephonyManager.SIM_STATE_READY) {
+                            return true;
+                        }
+                        // Brand-new empty eUICC (e.g. 小白卡) or eUICC with all SGP.22 profiles disabled may stay
+                        // in SIM_STATE_NOT_READY without an active profile; keep eSIM logically active when
+                        // enabled so Settings keeps "Manage eSIM" clickable for downloading the first profile.
+                        SubscriptionInfo subInfo = Sim2Subscription.resolveOrNull(ctx);
+                        return subInfo == null || Sim2Subscription.enabledSafe(subInfo);
                     });
                 } else if ("setEsimState".equals(mName)
                         && method.getParameterCount() == 1
@@ -248,20 +347,24 @@ public final class CompatModule extends XposedModule {
                                 Log.w(TAG, "eSIM switch rejected: no verified eUICC in SIM2; ordinary SIM left unchanged");
                                 return -1;
                             }
-                            Sim2Subscription.resolve(ctx);
+                            SubscriptionInfo subInfo = Sim2Subscription.resolveOrNull(ctx);
                             String prevSetting = Settings.Secure.getString(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM);
                             boolean enableSim2 = (state == 0);
                             if (!Settings.Secure.putInt(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, enableSim2 ? 1 : 0)) {
                                 return -1;
                             }
-                            try {
-                                Sim2Subscription.set(ctx, enableSim2);
-                            } catch (Throwable t) {
-                                Settings.Secure.putString(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, prevSetting);
-                                Log.e(TAG, "SIM2 switch failed; logical state restored", t);
-                                return -1;
+                            if (subInfo != null) {
+                                try {
+                                    Sim2Subscription.set(ctx, subInfo, enableSim2);
+                                } catch (Throwable t) {
+                                    Settings.Secure.putString(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, prevSetting);
+                                    Log.e(TAG, "SIM2 switch failed; logical state restored", t);
+                                    return -1;
+                                }
+                                Log.i(TAG, "eSIM switch=" + enableSim2 + "; SIM2 UICC applications=" + enableSim2);
+                            } else {
+                                Log.i(TAG, "eSIM switch=" + enableSim2 + "; verified SIM2 eUICC has no active profile yet (logical state updated)");
                             }
-                            Log.i(TAG, "eSIM switch=" + enableSim2 + "; SIM2 UICC applications=" + enableSim2);
                             return 0;
                         } catch (Throwable t) {
                             Log.e(TAG, "eSIM/SIM2 switch rejected", t);
@@ -284,11 +387,12 @@ public final class CompatModule extends XposedModule {
         hook(uiccCtrl.getDeclaredMethod("getCardIdForDefaultEuicc")).intercept(chain -> {
             Object orig = chain.proceed();
             if (!active()) return orig;
-            if (orig instanceof Integer && (int) orig >= 0) return orig;
             long token = Binder.clearCallingIdentity();
             try {
                 Context ctx = resolvePhoneContext(phoneCtxField);
-                if (ctx != null && CardTypeGuard.isEuicc(ctx)) return 1;
+                if (ctx != null && CardTypeGuard.isEuicc(ctx)) {
+                    return resolveSlot1CardId(ctx);
+                }
             } finally {
                 Binder.restoreCallingIdentity(token);
             }
@@ -308,13 +412,15 @@ public final class CompatModule extends XposedModule {
             try {
                 Context ctx = resolvePhoneContext(phoneCtxField);
                 if (ctx == null || !CardTypeGuard.isEuicc(ctx)) return orig;
-                for (Object item : (ArrayList<?>) orig) {
+                ArrayList<?> list = (ArrayList<?>) orig;
+                int syntheticCardId = resolveSyntheticSlot1CardId(list);
+                for (Object item : list) {
                     if (item instanceof UiccCardInfo) {
                         UiccCardInfo card = (UiccCardInfo) item;
                         if (card.getPhysicalSlotIndex() == 1) {
                             fIsEuicc.setBoolean(card, true);
                             if (card.getCardId() < 0) {
-                                fCardId.setInt(card, 1);
+                                fCardId.setInt(card, syntheticCardId);
                             }
                         }
                     }
@@ -363,11 +469,17 @@ public final class CompatModule extends XposedModule {
         hook(getSlotIdx).intercept(chain -> {
             Object orig = chain.proceed();
             if (!active()) return orig;
-            if (orig instanceof Integer && (int) orig >= 0) return orig;
+            int requestedCardId = (int) chain.getArg(0);
             long token = Binder.clearCallingIdentity();
             try {
                 Context ctx = resolvePhoneContext(phoneCtxField);
-                if (ctx != null && CardTypeGuard.isEuicc(ctx)) return 1;
+                if (ctx != null && CardTypeGuard.isEuicc(ctx)) {
+                    int slot1CardId = resolveSlot1CardId(ctx);
+                    if (requestedCardId == slot1CardId || requestedCardId < 0
+                            || !(orig instanceof Integer) || (int) orig < 0) {
+                        return 1;
+                    }
+                }
             } finally {
                 Binder.restoreCallingIdentity(token);
             }
@@ -380,11 +492,17 @@ public final class CompatModule extends XposedModule {
         hook(getSlotId).intercept(chain -> {
             Object orig = chain.proceed();
             if (!active()) return orig;
-            if (orig instanceof Integer && (int) orig >= 0) return orig;
+            int requestedCardId = (int) chain.getArg(0);
             long token = Binder.clearCallingIdentity();
             try {
                 Context ctx = resolvePhoneContext(phoneCtxField);
-                if (ctx != null && CardTypeGuard.isEuicc(ctx)) return 1;
+                if (ctx != null && CardTypeGuard.isEuicc(ctx)) {
+                    int slot1CardId = resolveSlot1CardId(ctx);
+                    if (requestedCardId == slot1CardId || requestedCardId < 0
+                            || !(orig instanceof Integer) || (int) orig < 0) {
+                        return 1;
+                    }
+                }
             } finally {
                 Binder.restoreCallingIdentity(token);
             }
@@ -463,10 +581,15 @@ public final class CompatModule extends XposedModule {
                     Object utilInst = getSimUtilInst.invoke(null);
                     List<?> ports = (List<?>) getPortsMethod.invoke(utilInst, ctx);
                     result.putInt("lpa_port_count", ports != null ? ports.size() : 0);
-                    result.putBoolean("lpa_port0_active", (boolean) isPortActiveMethod.invoke(utilInst, ctx, 0));
+                    IN_RAW_PORT_CHECK.set(true);
+                    try {
+                        result.putBoolean("lpa_port0_active", (boolean) isPortActiveMethod.invoke(utilInst, ctx, 0));
+                    } finally {
+                        IN_RAW_PORT_CHECK.set(false);
+                    }
                 }
             } catch (Throwable e) {
-                while (e.getCause() != null) e = e.getCause();
+                e = EuiccCardReader.unwrap(e);
                 result.putString("status", (!OmapiBridge.isBusy() && e instanceof NoSuchElementException) ? "normal" : "unknown");
                 Log.i(TAG, "read-only SIM2 probe: " + e.getClass().getSimpleName());
             } finally {
@@ -478,13 +601,17 @@ public final class CompatModule extends XposedModule {
         hook(getPortsMethod).intercept(chain -> {
             if (!active()) return chain.proceed();
             Context ctx = (Context) chain.getArg(0);
+            OmapiBridge.setContext(ctx);
             try {
                 OmapiBridge.readEid(false);
                 TelephonyManager tm = ctx.getSystemService(TelephonyManager.class);
                 if (tm != null) {
-                    for (UiccCardInfo card : tm.getUiccCardsInfo()) {
-                        if (card != null && card.getPhysicalSlotIndex() == 1) {
-                            return new ArrayList<>(card.getPorts());
+                    List<UiccCardInfo> cards = tm.getUiccCardsInfo();
+                    if (cards != null) {
+                        for (UiccCardInfo card : cards) {
+                            if (card != null && card.getPhysicalSlotIndex() == 1 && card.getPorts() != null) {
+                                return new ArrayList<>(card.getPorts());
+                            }
                         }
                     }
                 }
@@ -493,6 +620,72 @@ public final class CompatModule extends XposedModule {
             }
             return new ArrayList<>();
         });
+
+        hook(isPortActiveMethod).intercept(chain -> {
+            Object orig = chain.proceed();
+            if (!active() || IN_RAW_PORT_CHECK.get() || Boolean.TRUE.equals(orig)) return orig;
+            int portIdx = (int) chain.getArg(1);
+            if (portIdx != 0) return orig;
+            Context ctx = (Context) chain.getArg(0);
+            if (ctx == null) return orig;
+            OmapiBridge.setContext(ctx);
+            try {
+                TelephonyManager tm = ctx.getSystemService(TelephonyManager.class);
+                if (tm != null) {
+                    int simState = tm.getSimState(1);
+                    if (simState != TelephonyManager.SIM_STATE_ABSENT
+                            && simState != TelephonyManager.SIM_STATE_UNKNOWN) {
+                        OmapiBridge.readEid(false);
+                        return true;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            return orig;
+        });
+
+        // On HyperOS 4 devices whose stock vendor ROM declares android.hardware.telephony.euicc.mep
+        // (such as REDMI K90 Pro Max / myron), keep MIUIEsimLPA in SEP (port 0, logical slot 1, direct
+        // ISD-R APDU) mode whenever our removable SIM2 eUICC module is active so LPA never routes ES10x
+        // jobs into frameworkEs10xExecute (v3.b.d) or attempts ESIM_DUAL / port-1 slot remapping (g4.a.j).
+        try {
+            Class<?> appPmClass = Class.forName("android.app.ApplicationPackageManager");
+            hook(appPmClass.getDeclaredMethod("hasSystemFeature", String.class)).intercept(chain -> {
+                if (active() && "android.hardware.telephony.euicc.mep".equals(chain.getArg(0))) {
+                    return false;
+                }
+                return chain.proceed();
+            });
+            try {
+                hook(appPmClass.getDeclaredMethod("hasSystemFeature", String.class, int.class)).intercept(chain -> {
+                    if (active() && "android.hardware.telephony.euicc.mep".equals(chain.getArg(0))) {
+                        return false;
+                    }
+                    return chain.proceed();
+                });
+            } catch (Throwable ignored) {
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "LPA ApplicationPackageManager MEP feature hook skipped: " + t.getClass().getSimpleName());
+        }
+
+        try {
+            Class<?> mepHelperClass = loader.loadClass("g4.a");
+            hook(mepHelperClass.getDeclaredMethod("j", Context.class)).intercept(chain ->
+                    active() ? Boolean.FALSE : chain.proceed());
+        } catch (Throwable t) {
+            Log.w(TAG, "LPA g4.a MEP guard hook skipped: " + t.getClass().getSimpleName());
+        }
+
+        try {
+            Class<?> devUtilClass = loader.loadClass("v3.b");
+            hook(devUtilClass.getDeclaredMethod("b")).intercept(chain ->
+                    active() ? Boolean.FALSE : chain.proceed());
+            hook(devUtilClass.getDeclaredMethod("d")).intercept(chain ->
+                    active() ? Boolean.FALSE : chain.proceed());
+        } catch (Throwable t) {
+            Log.w(TAG, "LPA v3.b MEP guard hook skipped: " + t.getClass().getSimpleName());
+        }
 
         Method resolvedSaveEidMethod = null;
         try {
@@ -509,6 +702,7 @@ public final class CompatModule extends XposedModule {
             hook(h3n.getDeclaredMethod("k", Context.class)).intercept(chain -> {
                 if (!active()) return chain.proceed();
                 Context ctx = (Context) chain.getArg(0);
+                OmapiBridge.setContext(ctx);
                 try {
                     String eid = OmapiBridge.readEid(false);
                     if (finalSaveMethod != null) {
@@ -537,6 +731,8 @@ public final class CompatModule extends XposedModule {
         hook(simUtilClass.getDeclaredMethod("e", Context.class, int.class)).intercept(chain -> {
             int slotArg = (int) chain.getArg(1);
             if (!active() || (slotArg != 1 && slotArg >= 0)) return chain.proceed();
+            Context ctx = (Context) chain.getArg(0);
+            OmapiBridge.setContext(ctx);
             try {
                 String eid = OmapiBridge.readEid(false);
                 if (saveEidMethod != null) {
@@ -626,6 +822,8 @@ public final class CompatModule extends XposedModule {
                         builder.setConfirmationCode(sub.getConfirmationCode());
                         args[subIdx] = builder.build();
                     }
+                    // XmLPAService.onDownloadSubscription (4-arg, 5-arg, and 6-arg overloads) always takes
+                    // slotIndex/slotId (1 for SIM2) as arg[0], never cardId.
                     if (args.length > 0 && args[0] instanceof Integer) {
                         args[0] = 1;
                     }
@@ -643,21 +841,31 @@ public final class CompatModule extends XposedModule {
                 int.class, int.class, int.class, int.class, int.class, int.class, int.class, String.class);
 
         hook(openChMethod).intercept(chain -> {
-            if (!active() || (int) chain.getArg(0) != 1) return chain.proceed();
-            Object result = chain.proceed();
-            if (result != null && OmapiBridge.getResponseStatus(result) == 1) {
-                int chId = OmapiBridge.getResponseChannel(result);
-                if (chId >= 0) {
-                    OmapiBridge.onRilOpen(chId);
+            if (!active() || IN_DIRECT_RIL.get() || (int) chain.getArg(0) != 1) return chain.proceed();
+            Object result = null;
+            try {
+                result = chain.proceed();
+            } catch (Throwable rilOpenErr) {
+                Log.w(TAG, "RIL open channel threw " + rilOpenErr.getClass().getSimpleName() + "; falling back to OMAPI");
+            }
+            if (result != null) {
+                int status = OmapiBridge.getResponseStatus(result);
+                if (status == EuiccCardReader.RIL_STATUS_NO_ERROR) {
+                    int chId = OmapiBridge.getResponseChannel(result);
+                    if (chId >= 0) {
+                        OmapiBridge.onRilOpen(chId);
+                        return result;
+                    }
+                } else if (status == EuiccCardReader.RIL_STATUS_NO_SUCH_ELEMENT) {
+                    return result;
                 }
-                return result;
             }
             return OmapiBridge.openSafe((String) chain.getArg(1), (int) chain.getArg(2), result);
         });
 
         final boolean closeReturnsBoolean = (closeChMethod.getReturnType() == boolean.class);
         hook(closeChMethod).intercept(chain -> {
-            if (!active()) return chain.proceed();
+            if (!active() || IN_DIRECT_RIL.get()) return chain.proceed();
             int slot = (int) chain.getArg(0);
             if (slot != 1) {
                 return chain.proceed();
@@ -672,18 +880,52 @@ public final class CompatModule extends XposedModule {
         });
 
         hook(transmitApduMethod).intercept(chain -> {
-            if (!active() || (int) chain.getArg(0) != 1) return chain.proceed();
+            if (!active() || IN_DIRECT_RIL.get() || (int) chain.getArg(0) != 1) return chain.proceed();
             int id = (int) chain.getArg(1);
-            if (!OmapiBridge.owns(id)) return chain.proceed();
-            return OmapiBridge.transmit(
-                    id,
-                    (int) chain.getArg(2),
-                    (int) chain.getArg(3),
-                    (int) chain.getArg(4),
-                    (int) chain.getArg(5),
-                    (int) chain.getArg(6),
-                    (String) chain.getArg(7)
-            );
+            int cla = (int) chain.getArg(2);
+            int ins = (int) chain.getArg(3);
+            int p1 = (int) chain.getArg(4);
+            int p2 = (int) chain.getArg(5);
+            int p3 = (int) chain.getArg(6);
+            String data = (String) chain.getArg(7);
+            if (OmapiBridge.owns(id)) {
+                return OmapiBridge.transmit(id, cla, ins, p1, p2, p3, data);
+            }
+            boolean isCase4 = p3 > 0 && data != null && data.length() == (p3 + 1) * 2;
+            String effectiveData = data;
+            Object rawObj = null;
+            Throwable proceedErr = null;
+            try {
+                rawObj = chain.proceed();
+            } catch (Throwable t) {
+                if (!isCase4) {
+                    throw t;
+                }
+                proceedErr = t;
+            }
+            String rawStr = (rawObj instanceof String) ? ((String) rawObj).trim() : null;
+            if (isCase4 && (rawStr == null || rawStr.length() < 4
+                    || "6700".equalsIgnoreCase(rawStr) || "6F00".equalsIgnoreCase(rawStr))) {
+                String case3Data = data.substring(0, p3 * 2);
+                TelephonyManager tm = (TelephonyManager) chain.getThisObject();
+                IN_DIRECT_RIL.set(true);
+                try {
+                    rawStr = EuiccCardReader.invokeRilTx(tm, 1, id, cla, ins, p1, p2, p3, case3Data);
+                    rawObj = rawStr;
+                    effectiveData = case3Data;
+                    proceedErr = null;
+                } finally {
+                    IN_DIRECT_RIL.set(false);
+                }
+            }
+            if (proceedErr != null) {
+                throw proceedErr;
+            }
+            if (!(rawObj instanceof String) || (ins & 0xFF) == 0xC0) {
+                return rawObj;
+            }
+            return OmapiBridge.completeRilApduIfNeeded(
+                    (TelephonyManager) chain.getThisObject(), id, cla, ins, p1, p2, p3, effectiveData, (String) rawObj);
         });
 
         try {
@@ -763,19 +1005,20 @@ public final class CompatModule extends XposedModule {
             Log.w(TAG, "ProfileManageFragment nickname hook skipped: " + t.getClass().getSimpleName());
         }
 
-        Log.i(TAG, "LPA hooks ready; OMAPI SIM2 fallback and one-click download bridge available");
+        Log.i(TAG, "LPA hooks ready; dual-channel OMAPI+RIL SIM2 bridge and 61XX/6CXX APDU support active");
     }
 
     /**
-     * Thread-safe OMAPI session/channel manager for physical Slot 2 (SIM2) ISD-R APDU communication.
+     * Thread-safe OMAPI + RIL fallback session/channel manager for physical Slot 2 (SIM2) ISD-R APDU communication.
      */
     private static final class OmapiBridge {
-        private static final String ISDR_AID = "A0000005591010FFFFFFFF8900000100";
-        private static final byte[] GET_EID_APDU_BF3E = EuiccCardReader.fromHex("80E2910006BF3E035C015A00");
-        private static final byte[] GET_EID_APDU_BF2E = EuiccCardReader.fromHex("80E2910006BF2E035C015A00");
-
         private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "EsimH4-Omapi");
+            t.setDaemon(true);
+            return t;
+        });
+        private static final ExecutorService BIND_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "EsimH4-OmapiBind");
             t.setDaemon(true);
             return t;
         });
@@ -815,6 +1058,11 @@ public final class CompatModule extends XposedModule {
             }
         }
 
+        private static synchronized Context resolveContext() {
+            Context ctx = currentApp();
+            return ctx != null ? ctx : fallbackContext;
+        }
+
         static synchronized boolean owns(int id) {
             return CHANNELS.containsKey(id);
         }
@@ -839,17 +1087,70 @@ public final class CompatModule extends XposedModule {
             return (int) RESP_GET_CHANNEL.invoke(response);
         }
 
-        private static Reader getSim2Reader() throws Exception {
+        private static synchronized Reader getSim2Reader() throws Exception {
             if (seService == null || !seService.isConnected()) {
-                Context ctx = currentApp();
-                if (ctx == null) ctx = fallbackContext;
-                if (ctx == null) throw new IllegalStateException("Application context unavailable");
-                CountDownLatch latch = new CountDownLatch(1);
-                seService = new SEService(ctx, EXECUTOR, latch::countDown);
-                if (!latch.await(8, TimeUnit.SECONDS) || !seService.isConnected()) {
+                if (seService != null) {
+                    try {
+                        seService.shutdown();
+                    } catch (Throwable ignored) {
+                    }
                     seService = null;
+                }
+                Context ctx = resolveContext();
+                if (ctx == null) throw new IllegalStateException("Application context unavailable");
+                Context baseCtx = ctx.getApplicationContext() != null ? ctx.getApplicationContext() : ctx;
+                // Android 15–17 SEService calls context.getApplicationContext(), then either:
+                // 1) checks ServiceManager("android.se.omapi.ISecureElementService/default") synchronously and
+                //    bounces listener.onConnected() via mContext.getMainExecutor(), or
+                // 2) falls back to 3-arg mContext.bindService(...) which dispatches onto Main Looper by default.
+                // Overriding getApplicationContext(), getMainExecutor(), and bindService(...) keeps every path off
+                // Main Looper so LpaApplication.onCreate() / Main Thread can never self- or AB-BA-deadlock.
+                Context bindCtx = new ContextWrapper(baseCtx) {
+                    @Override
+                    public Context getApplicationContext() {
+                        return this;
+                    }
+
+                    @Override
+                    public Executor getMainExecutor() {
+                        return BIND_EXECUTOR;
+                    }
+
+                    @Override
+                    public boolean bindService(Intent service, ServiceConnection conn, int flags) {
+                        return super.bindService(service, flags, BIND_EXECUTOR, conn);
+                    }
+
+                    @SuppressLint("NewApi")
+                    @Override
+                    public boolean bindService(Intent service, ServiceConnection conn, Context.BindServiceFlags flags) {
+                        return super.bindService(service, flags, BIND_EXECUTOR, conn);
+                    }
+                };
+                CountDownLatch latch = new CountDownLatch(1);
+                SEService candidate = new SEService(bindCtx, EXECUTOR, latch::countDown);
+                boolean connected = false;
+                try {
+                    connected = candidate.isConnected()
+                            || (latch.await(8, TimeUnit.SECONDS) && candidate.isConnected());
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                } catch (Throwable t) {
+                    try {
+                        candidate.shutdown();
+                    } catch (Throwable ignored) {
+                    }
+                    if (t instanceof Exception) throw (Exception) t;
+                    throw new RuntimeException(t);
+                }
+                if (!connected) {
+                    try {
+                        candidate.shutdown();
+                    } catch (Throwable ignored) {
+                    }
                     throw new IllegalStateException("OMAPI connection timed out");
                 }
+                seService = candidate;
             }
             Reader sim2 = null;
             Reader[] readers = seService.getReaders();
@@ -886,7 +1187,7 @@ public final class CompatModule extends XposedModule {
                 if (RESP_CTOR == null) {
                     throw new IllegalStateException("IccOpenLogicalChannelResponse constructor unavailable");
                 }
-                return RESP_CTOR.newInstance(id, 1, channel.getSelectResponse());
+                return RESP_CTOR.newInstance(id, EuiccCardReader.RIL_STATUS_NO_ERROR, channel.getSelectResponse());
             } catch (Throwable e) {
                 if (id >= 0) {
                     CHANNELS.remove(id);
@@ -911,13 +1212,21 @@ public final class CompatModule extends XposedModule {
             try {
                 return open(aid, p2);
             } catch (Throwable e) {
-                while (e.getCause() != null) e = e.getCause();
+                e = EuiccCardReader.unwrap(e);
                 Log.w(TAG, "OMAPI open fallback unavailable: " + e.getClass().getSimpleName());
-                try {
-                    int status = (e instanceof NoSuchElementException) ? 3 : 2;
-                    return RESP_CTOR.newInstance(-1, status, null);
-                } catch (Throwable ignored) {
+                if (e instanceof NoSuchElementException && RESP_CTOR != null) {
+                    try {
+                        return RESP_CTOR.newInstance(-1, EuiccCardReader.RIL_STATUS_NO_SUCH_ELEMENT, null);
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (rilFallback != null) {
                     return rilFallback;
+                }
+                try {
+                    return RESP_CTOR.newInstance(-1, EuiccCardReader.RIL_STATUS_MISSING_RESOURCE, null);
+                } catch (Throwable ignored) {
+                    return null;
                 }
             }
         }
@@ -938,31 +1247,99 @@ public final class CompatModule extends XposedModule {
                 throw new IllegalStateException("OMAPI channel not open: " + id);
             }
             byte[] body = (data == null || data.isEmpty()) ? new byte[0] : EuiccCardReader.fromHex(data);
-            byte[] apdu = new byte[5 + body.length];
-            apdu[0] = (byte) cla;
-            apdu[1] = (byte) ins;
-            apdu[2] = (byte) p1;
-            apdu[3] = (byte) p2;
-            apdu[4] = (byte) p3;
-            System.arraycopy(body, 0, apdu, 5, body.length);
-            byte[] reply = ch.transmit(apdu);
+            byte[] apdu;
+            if (p3 < 0 && body.length == 0) {
+                apdu = new byte[]{(byte) cla, (byte) ins, (byte) p1, (byte) p2};
+            } else {
+                apdu = new byte[5 + body.length];
+                apdu[0] = (byte) cla;
+                apdu[1] = (byte) ins;
+                apdu[2] = (byte) p1;
+                apdu[3] = (byte) p2;
+                apdu[4] = (byte) p3;
+                System.arraycopy(body, 0, apdu, 5, body.length);
+            }
+            // SecureElement Terminal.transmit normally resolves 6CXX/61XX and returns 9000;
+            // transceiveApdu is a zero-cost pass-through on 9000 and safely finishes 6CXX/61XX
+            // if any vendor SE HAL returns raw 6CXX/61XX, preventing LPA double-fetch or chunk loss.
+            byte[] reply = EuiccCardReader.transceiveApdu(ch::transmit, apdu);
             return EuiccCardReader.toHexUpper(reply);
         }
 
-        private static String extractEid(byte[] bytes) {
-            if (bytes == null || bytes.length < 20) return null;
-            if (bytes[bytes.length - 2] != (byte) 0x90 || bytes[bytes.length - 1] != 0) return null;
-            for (int i = 0; i + 17 < bytes.length - 2; i++) {
-                if ((bytes[i] & 0xFF) == 0x5A && (bytes[i + 1] & 0xFF) == 16) {
-                    byte[] eidBytes = new byte[16];
-                    System.arraycopy(bytes, i + 2, eidBytes, 0, 16);
-                    String candidate = EuiccCardReader.toHexUpper(eidBytes);
-                    if (candidate.matches("[0-9]{32}")) {
-                        return candidate;
-                    }
-                }
+        static String completeRilApduIfNeeded(
+                TelephonyManager tm, int channel, int cla, int ins, int p1, int p2, int p3,
+                String data, String initialHex) {
+            if (tm == null || initialHex == null || initialHex.length() < 4) {
+                return initialHex;
             }
-            return null;
+            try {
+                byte[] resp = EuiccCardReader.fromHex(initialHex.trim());
+                if (resp.length < 2) return initialHex;
+                int sw1 = resp[resp.length - 2] & 0xFF;
+                if (sw1 != 0x6C && sw1 != 0x61) {
+                    return initialHex;
+                }
+                IN_DIRECT_RIL.set(true);
+                try {
+                    if (resp.length == 2 && sw1 == 0x6C) {
+                        int sw2 = resp[1] & 0xFF;
+                        byte[] body = (data == null || data.isEmpty()) ? new byte[0] : EuiccCardReader.fromHex(data);
+                        byte[] retryApdu;
+                        if (body.length == 0) {
+                            retryApdu = new byte[]{(byte) cla, (byte) ins, (byte) p1, (byte) p2, (byte) sw2};
+                        } else if (body.length == p3 + 1) {
+                            retryApdu = new byte[5 + body.length];
+                            retryApdu[0] = (byte) cla;
+                            retryApdu[1] = (byte) ins;
+                            retryApdu[2] = (byte) p1;
+                            retryApdu[3] = (byte) p2;
+                            retryApdu[4] = (byte) p3;
+                            System.arraycopy(body, 0, retryApdu, 5, body.length);
+                            retryApdu[retryApdu.length - 1] = (byte) sw2;
+                        } else {
+                            retryApdu = new byte[5 + body.length + 1];
+                            retryApdu[0] = (byte) cla;
+                            retryApdu[1] = (byte) ins;
+                            retryApdu[2] = (byte) p1;
+                            retryApdu[3] = (byte) p2;
+                            retryApdu[4] = (byte) p3;
+                            System.arraycopy(body, 0, retryApdu, 5, body.length);
+                            retryApdu[retryApdu.length - 1] = (byte) sw2;
+                        }
+                        resp = EuiccCardReader.transmitRilApdu(tm, 1, channel, retryApdu);
+                    }
+                    if (resp != null && resp.length >= 2 && (resp[resp.length - 2] & 0xFF) == 0x61) {
+                        ByteArrayOutputStream out = new ByteArrayOutputStream();
+                        int chunks = 0;
+                        while ((resp[resp.length - 2] & 0xFF) == 0x61) {
+                            if (++chunks > EuiccCardReader.MAX_GET_RESPONSE_CHUNKS) {
+                                throw new IllegalStateException("RIL GET RESPONSE chain exceeded "
+                                        + EuiccCardReader.MAX_GET_RESPONSE_CHUNKS + " chunks");
+                            }
+                            if (resp.length > 2) {
+                                out.write(resp, 0, resp.length - 2);
+                            }
+                            byte le = resp[resp.length - 1];
+                            resp = EuiccCardReader.transmitRilApdu(
+                                    tm, 1, channel, new byte[]{0x00, (byte) 0xC0, 0x00, 0x00, le});
+                            if (resp.length == 2 && (resp[0] & 0xFF) == 0x6C) {
+                                resp = EuiccCardReader.transmitRilApdu(
+                                        tm, 1, channel, new byte[]{0x00, (byte) 0xC0, 0x00, 0x00, resp[1]});
+                            }
+                        }
+                        out.write(resp, 0, resp.length);
+                        resp = out.toByteArray();
+                    }
+                    return EuiccCardReader.toHexUpper(resp);
+                } finally {
+                    IN_DIRECT_RIL.set(false);
+                }
+            } catch (IllegalStateException chainOverflow) {
+                throw chainOverflow;
+            } catch (Throwable t) {
+                Log.w(TAG, "RIL 61XX/6CXX completion fallback skipped: " + t.getClass().getSimpleName());
+                return initialHex;
+            }
         }
 
         static synchronized String readEid(boolean forceRefresh) throws Exception {
@@ -970,66 +1347,104 @@ public final class CompatModule extends XposedModule {
                 return cachedEid;
             }
             if (!forceRefresh && cachedEid != null && SystemClock.elapsedRealtime() - cachedEidAt < 10000L) {
-                try {
-                    getSim2Reader();
-                    return cachedEid;
-                } catch (Throwable ignored) {
+                Context ctx = resolveContext();
+                if (ctx != null) {
+                    TelephonyManager tm = ctx.getSystemService(TelephonyManager.class);
+                    if (tm != null) {
+                        if (tm.getSimState(1) != TelephonyManager.SIM_STATE_ABSENT) {
+                            return cachedEid;
+                        }
+                        cachedEid = null;
+                        cachedEidAt = 0L;
+                    }
                 }
             }
-            Object response;
+
+            Exception omapiError = null;
+            Object response = null;
             try {
-                response = open(ISDR_AID, 0);
+                response = open(EuiccCardReader.ISDR_AID, 0);
             } catch (Exception e) {
                 if (isBusy() && cachedEid != null) {
                     return cachedEid;
                 }
-                Throwable root = e;
-                while (root.getCause() != null) root = root.getCause();
+                Throwable root = EuiccCardReader.unwrap(e);
                 if (root instanceof NoSuchElementException) {
                     cachedEid = null;
                     cachedEidAt = 0L;
+                    throw (NoSuchElementException) root;
                 }
-                throw e;
+                omapiError = e;
             }
-            int id = -1;
-            try {
-                id = getResponseChannel(response);
-                if (id < 0) {
-                    throw new IllegalStateException("Invalid channel ID from response: " + id);
-                }
-                Channel ch = CHANNELS.get(id);
-                if (ch == null) {
-                    throw new IllegalStateException("OMAPI channel not registered: " + id);
-                }
-                String eid = null;
+
+            if (response != null) {
+                int id = -1;
                 try {
-                    byte[] bytes = ch.transmit(GET_EID_APDU_BF3E);
-                    eid = extractEid(bytes);
-                } catch (Throwable t) {
-                    Log.d(TAG, "BF3E GET EID attempt failed: " + t.getMessage());
-                }
-                if (eid == null) {
+                    id = getResponseChannel(response);
+                    if (id < 0) {
+                        throw new IllegalStateException("Invalid channel ID from response: " + id);
+                    }
+                    Channel ch = CHANNELS.get(id);
+                    if (ch == null) {
+                        throw new IllegalStateException("OMAPI channel not registered: " + id);
+                    }
+                    String eid = null;
                     try {
-                        byte[] bytes = ch.transmit(GET_EID_APDU_BF2E);
-                        eid = extractEid(bytes);
+                        byte[] bytes = EuiccCardReader.transceiveApdu(ch::transmit, EuiccCardReader.GET_EID_APDU_BF3E);
+                        eid = EuiccCardReader.extractEid(bytes);
                     } catch (Throwable t) {
-                        Log.d(TAG, "BF2E GET EID attempt failed: " + t.getMessage());
+                        Log.d(TAG, "BF3E GET EID attempt failed: " + t.getMessage());
+                    }
+                    if (eid == null) {
+                        try {
+                            byte[] bytes = EuiccCardReader.transceiveApdu(ch::transmit, EuiccCardReader.GET_EID_APDU_BF2E);
+                            eid = EuiccCardReader.extractEid(bytes);
+                        } catch (Throwable t) {
+                            Log.d(TAG, "BF2E GET EID attempt failed: " + t.getMessage());
+                        }
+                    }
+                    if (eid != null) {
+                        cachedEid = eid;
+                        cachedEidAt = SystemClock.elapsedRealtime();
+                        Log.i(TAG, "real EID read from SIM2 via OMAPI (value omitted)");
+                        return cachedEid;
+                    }
+                    omapiError = new IllegalStateException("EID TLV missing on both BF3E and BF2E over OMAPI");
+                } finally {
+                    if (id >= 0) {
+                        close(id);
                     }
                 }
-                if (eid != null) {
-                    cachedEid = eid;
-                    cachedEidAt = SystemClock.elapsedRealtime();
-                    Log.i(TAG, "real EID read from SIM2 (value omitted)");
-                    return cachedEid;
-                }
-                throw new IllegalStateException("EID TLV missing on both BF3E and BF2E");
-            } finally {
-                if (id >= 0) {
-                    close(id);
-                } else {
-                    close(nextChannelId - 1);
+            }
+
+            // Fallback to direct Telephony RIL logical channel (iccOpenLogicalChannelBySlot(1, ISDR_AID, 0))
+            // when OMAPI fails with SecurityException (ARA-M) or SEService unavailability.
+            Context ctx = resolveContext();
+            if (ctx != null) {
+                IN_DIRECT_RIL.set(true);
+                try {
+                    String rilEid = EuiccCardReader.readEidViaRil(ctx);
+                    if (EuiccCardReader.isValidEid(rilEid)) {
+                        cachedEid = rilEid;
+                        cachedEidAt = SystemClock.elapsedRealtime();
+                        Log.i(TAG, "real EID read from SIM2 via RIL fallback (value omitted)");
+                        return cachedEid;
+                    }
+                } catch (NoSuchElementException normalSim) {
+                    cachedEid = null;
+                    cachedEidAt = 0L;
+                    throw normalSim;
+                } catch (Throwable rilErr) {
+                    Log.w(TAG, "RIL EID fallback unavailable: " + rilErr.getClass().getSimpleName());
+                } finally {
+                    IN_DIRECT_RIL.set(false);
                 }
             }
+
+            if (omapiError != null) {
+                throw omapiError;
+            }
+            throw new IllegalStateException("SIM2 EID unavailable on both OMAPI and RIL");
         }
     }
 }

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="xposed_description">小米 HyperOS 4 实体可插拔 eSIM (ESTKme / 小白卡 / 9eSIM / Xesim 等) SIM2 桥接与官方系统 LPA 兼容模块 v0.5.0</string>
+</resources>

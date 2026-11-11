@@ -1,20 +1,22 @@
-# 小米 HyperOS 4 实体 eSIM (ESTKme) 适配与桥接方案
-# HyperOS 4 Physical eSIM (ESTKme) Adaptation
+# 小米 HyperOS 4 可插拔实体 eSIM（ESTKme / 小白卡 / 9eSIM 等）系统级适配与桥接方案
+# HyperOS 4 Removable Physical eSIM (ESTKme / EasyEUICC-Compatible) Adaptation (`v0.5.0`)
 
+[![Version](https://img.shields.io/badge/Version-v0.5.0-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Android](https://img.shields.io/badge/Platform-HyperOS%204%20%7C%20Android%2015%2B%20(SDK%2035%2B)-green.svg)]()
-[![Hardware](https://img.shields.io/badge/Card-ESTKme%20Physical%20eUICC%20(SIM2)-orange.svg)]()
-[![Root](https://img.shields.io/badge/Framework-KernelSU%20%7C%20Magisk%20%7C%20APatch%20%2B%20LSPosed-purple.svg)]()
+[![Hardware](https://img.shields.io/badge/SIM2-ESTKme%20%7C%20Xiaobai%20%7C%209eSIM%20%7C%20Xesim-orange.svg)]()
+[![Root](https://img.shields.io/badge/Framework-KernelSU%20%7C%20SukiSU%20%7C%20Magisk%20%7C%20APatch%20%2B%20LSPosed-purple.svg)]()
 
 ---
 
 ## 目录 / Table of Contents
 
 - [中文说明文档](#中文说明文档)
-  - [项目概览](#项目概览)
-  - [ESTKme 实体卡适配核心原理](#estkme-实体卡适配核心原理)
+  - [项目概览与 v0.5.0 更新亮点](#项目概览与-v050-更新亮点)
+  - [⚠️ KernelSU / SukiSU 用户必读：系统挂载元模块要求](#️-kernelsu--sukisu-用户必读系统挂载元模块要求)
+  - [实体 eSIM 卡适配核心原理](#实体-esim-卡适配核心原理)
   - [安全架构与测试红线约束](#安全架构与测试红线约束)
-  - [支持设备与系统版本](#支持设备与系统版本)
+  - [支持设备、系统与实体卡列表](#支持设备系统与实体卡列表)
   - [仓库与模块架构](#仓库与模块架构)
   - [安装与部署指南](#安装与部署指南)
   - [模拟测试框架与非破坏性验证](#模拟测试框架与非破坏性验证)
@@ -22,10 +24,11 @@
   - [安全须知与免责声明](#安全须知与免责声明)
   - [开源协议与参与贡献](#开源协议与参与贡献)
 - [English Documentation](#english-documentation)
-  - [Overview](#overview)
+  - [Overview & What's New in v0.5.0](#overview--whats-new-in-v050)
+  - [⚠️ Mandatory Metamodule Guide for KernelSU / SukiSU Users](#️-mandatory-metamodule-guide-for-kernelsu--sukisu-users)
   - [Core Adaptation Principles](#core-adaptation-principles)
   - [Security Architecture & Safety Red Lines](#security-architecture--safety-red-lines)
-  - [Supported Devices & System Requirements](#supported-devices--system-requirements)
+  - [Supported Devices, OS & Removable eSIM Cards](#supported-devices-os--removable-esim-cards)
   - [Repository Architecture](#repository-architecture)
   - [Installation & Deployment Guide](#installation--deployment-guide)
   - [Mock Testing Framework](#mock-testing-framework)
@@ -37,26 +40,45 @@
 
 # 中文说明文档
 
-## 项目概览
+## 项目概览与 v0.5.0 更新亮点
 
-**HyperOS 4 实体 eSIM (ESTKme) 适配与桥接方案** 是一套面向 Xiaomi HyperOS 4（Android 15 / 16 / 17，API 35+）的开源系统级兼容层与桥接模块，专门解决可插拔实体 eSIM 卡（如 **ESTKme** 系列卡片）在国行双物理卡槽小米机型上无法原生使用官方系统 LPA 的难题。
+**小米 HyperOS 4 可插拔实体 eSIM 适配与桥接方案（`v0.5.0`）** 是一套面向 Xiaomi / REDMI 澎湃 HyperOS 4（Android 15 / 16 / 17，API 35+）的开源系统级兼容层与桥接模块，专门解决各类符合 **GSMA SGP.22 标准的可插拔实体 eUICC 卡**（支持 EasyEUICC 的 **小白卡、携程/JoyTel 白卡、ESTKme、9eSIM、Xesim、5ber** 等）在国行双实体卡槽小米/红米机型上无法直接使用小米官方系统原生 LPA 写卡与管理套餐的难题。
 
-在小米 MIX Flip 2（`bixi`）等机型上，官方固件未开放对卡槽2中可插拔 eUICC 实体卡的原生支持。本项目实现：
-1. **完整原生 eSIM 系统能力**：免除修改官方 LPA 签名，系统底层挂载声明 `android.hardware.telephony.euicc` 特性，直接配合提取自小米旗舰机型的原版 `MIUIEsimLPA.apk`（v4.1.0.1）工作。
-2. **透明 OMAPI `SEService` 桥接**：将上层框架下发的 APDU 命令无缝转发至 SIM2 读卡器，彻底突破基带 RIL 通道限制。
-3. **Fail-Closed 实体卡安全守护（`CardTypeGuard`）**：严格进行 ISD-R AID 探测，在插入普通 SIM 卡时立即自动关闭 eSIM 模式，杜绝误操作。
-4. **卡槽1射频与网络彻底隔离**：拦截官方 LPA 面向板载 eSIM 设计的 GPIO 硬件天线切换逻辑，确保主卡（SIM1）移动网络、通话及 VoLTE 完全不受干扰。
-5. **零专有代码残留**：采用独立现代清晰的架构设计，完全不包含第三方专有代码片段。
+### `v0.5.0` 核心升级内容
+1. **全面兼容主流可插拔实体 eSIM 卡（含全新空白卡首写）**：
+   - 支持 **ESTKme** 以及所有兼容 **EasyEUICC / 标准 SGP.22** 的可插拔实体 eSIM 卡（如 **小白卡、携程/JoyTel 白卡、9eSIM、Xesim、5ber** 等）。
+   - **全新空白卡（0 套餐 / 无激活 Profile）直接写卡支持**：针对新买的空白实体 eSIM 卡（尚无 ICCID、`SubscriptionInfo` 为空、`SIM_STATE_NOT_READY`），修复系统设置「开启 eSIM 失败」与「管理 eSIM」置灰问题，插卡即可直接进入系统 eSIM 管理界面扫码下载第一张套餐。
+2. **ISO-7816-4 分段 APDU（`61XX` / `6CXX`）与 OMAPI + RIL 双通道容错**：
+   - 完整支持部分白卡固件返回 `61 XX`（自动链式发送 `00 C0 00 00 XX` `GET RESPONSE` 重组完整报文）与 `6C XX`（动态修正期望长度 `Le` 重试），兼容 `BF3E` 与 `BF2E` EID 读取。
+   - 新增 **Telephony RIL 逻辑通道自动兜底**：当部分卡片或机型无 ARA-M 规则导致 OMAPI 受阻时，自动回退至底层 RIL ISD-R 通道完成卡片识别与 EID 读取。
+3. **跨机型 HyperOS 4 深度适配（MIX Flip 2 / REDMI K90 Pro Max 等）**：
+   - 兼容原厂无 eSIM 配置机型（如 **Xiaomi MIX Flip 2** `bixi`，`cardId=1`）与原厂自带 `euicc.mep.xml` 多端口声明机型（如 **REDMI K90 Pro Max** `myron`，`cardId=5`），并适配不同 HyperOS 4 固件弹窗文案空格差异。
+4. **KernelSU / SukiSU 系统特权挂载守护与自愈修复**：
+   - 彻底根除无元模块环境下 `com.miui.euicc` 被误装入 `/data/app` 降级为普通第三方应用（丢失 `BIND_EUICC_SERVICE`、`SECURE_ELEMENT_PRIVILEGED_OPERATION` 等系统特权）的陷阱；自动检测并清理异常残留的 `/data/app` 无特权安装，并在主界面与测试应用中直观展示 **`LPA 系统特权挂载：✅ 已生效`** 诊断状态。
 
 ---
 
-## ESTKme 实体卡适配核心原理
+## ⚠️ KernelSU / SukiSU 用户必读：系统挂载元模块要求
 
-### 1. 透明 OMAPI `SEService` SIM2 读卡器桥接
-在 HyperOS 4 系统下，系统 Telephony RIL 守护进程在面对可插拔卡槽时往往会拒绝建立 eUICC 逻辑通道。本项目通过 `CompatModule` 拦截底层 APDU 通道交互，动态桥接至 Android 标准 Open Mobile API (`android.se.omapi.SEService`)：
-- 指定连接底层 **`SIM2`** 智能卡读卡器；
-- 分配从 **`12000+`** 开始的独立虚拟逻辑通道 ID（如 12000、12001）；
-- 将虚拟通道与 OMAPI 底层 Channel 实例严格同步管理，杜绝通道死锁与句柄泄漏。
+> **重要提示**：小米官方原版 `MIUIEsimLPA.apk`（`com.miui.euicc`）**必须**通过系统分区挂载至 `/product/priv-app/MIUIEsimLPA/MIUIEsimLPA.apk`，并配合 `/product/etc/permissions/privapp-permissions-euicc.xml` 特权白名单声明，才能获得 `FLAG_SYSTEM`、`BIND_EUICC_SERVICE`、`SECURE_ELEMENT_PRIVILEGED_OPERATION` 与 `MODIFY_PHONE_STATE` 系统级特权。若缺少系统挂载，LPA 将无法绑定系统 eSIM 框架或访问 SIM2 安全元件。
+
+- **KernelSU（v2.0+ / v3.0+）与 SukiSU Ultra（如 v4.x）用户**：
+  1. 由于新版 KernelSU 与 SukiSU Ultra 移除了内置 OverlayFS 挂载，**刷入本模块前必须先安装并启用系统挂载元模块**（推荐使用官方 **`meta-overlayfs`** 或 **`magic_mount`**，确保 `/data/adb/metamodule` 处于有效启用状态）。
+  2. 如果未安装或未启用元模块，本模块 `v0.5.0` 安装脚本（`customize.sh`）会主动拦截并给出双语提示，防止产生损坏的 `/data/app` 安装。
+  3. 刷入并开启模块重启后，请打开桌面上的 **「HYPEROS4实体ESIM桥接」** 或 **「eSIM 模拟写卡测试」**，确认首行显示：
+     - `LPA 系统特权挂载：✅ 已生效`
+     - 若显示 `❌ 未挂载（请检查 KernelSU/SukiSU 元模块如 meta-overlayfs 并重启）`，请检查元模块是否正常工作并重启手机。
+- **Magisk（v20.4+）与 APatch 用户**：自带系统分区挂载能力，直接刷入即可。
+
+---
+
+## 实体 eSIM 卡适配核心原理
+
+### 1. OMAPI `SEService` + Telephony RIL 双通道 SIM2 桥接
+在 HyperOS 4 系统下，部分固件的基带 RIL 或 OMAPI 访问控制存在差异。本项目通过 `CompatModule` 构建透明双通道架构：
+- 优先连接 Android Open Mobile API (`android.se.omapi.SEService`) **`SIM2`** 读卡器，分配从 **`12000+`** 起步的独立虚拟逻辑通道池，严格同步生命周期、杜绝句柄泄漏；
+- 支持 ISO-7816-4 `61 XX`（`GET RESPONSE` 分段拼接）与 `6C XX`（`Le` 自动重试）状态字处理；
+- 当 OMAPI 因卡片无 ARA-M 规则或服务未就绪受限时，自动使用 `TelephonyManager.iccOpenLogicalChannelBySlot(1, ISDR_AID, 0)` RIL 逻辑通道完成安全探测与 EID 解析。
 
 ```
 +--------------------------------------------------------------------+
@@ -66,68 +88,64 @@
                                   v
 +--------------------------------------------------------------------+
 |          CompatModule (LSPosed 模块: com.android.phone / euicc)    |
-|  - APDU 通道路由器与虚拟通道池 (12000+)                              |
+|  - APDU 通道路由器、虚拟通道池 (12000+) 与 61XX/6CXX 协议处理        |
 +--------------------------------------------------------------------+
            |                                         |
-           | (RIL 通道未就绪时自动降级)               | (普通 UICC 通道)
+           | (SIM2 双通道桥接: OMAPI 优先 + RIL 兜底)  | (普通 UICC 通道)
            v                                         v
 +-----------------------------+           +--------------------------+
-|  OMAPI SEService 桥接层     |           | 原生 Telephony RIL       |
-|  读卡器: "SIM2"             |           | 物理卡槽 0 (SIM1 主卡)   |
+|  SIM2 实体 eUICC 通信层      |           | 原生 Telephony RIL       |
+|  OMAPI "SIM2" / RIL Slot 1  |           | 物理卡槽 0 (SIM1 主卡)   |
 +-----------------------------+           +--------------------------+
            |                                         |
            v                                         v
 +-----------------------------+           +--------------------------+
-| ESTKme 可插拔实体 eSIM 卡   |           | 用户物理 SIM1 电话卡     |
-| 物理卡槽 2 (安全保护)       |           | 绝对隔离，保持常开       |
+| 可插拔实体 eSIM 卡 (SIM2)    |           | 用户物理 SIM1 电话卡     |
+| ESTKme / 小白卡 / 9eSIM 等   |           | 绝对隔离，保持常开       |
 +-----------------------------+           +--------------------------+
 ```
 
-### 2. SGP.22 ISD-R AID 逻辑通道管理
-GSMA SGP.22 规范定义了与 eUICC 根安全域（ISD-R）通信的应用标识符：
+### 2. SGP.22 ISD-R AID 探测与全新空白卡生命周期支持
+GSMA SGP.22 规范定义了 eUICC 根安全域（ISD-R）应用标识符：
 ```
 A0 00 00 05 59 10 10 FF FF FF FF 89 00 00 01 00
 ```
-`CompatModule` 负责精细化的通道管理：
-- 使用 P2 参数 `0x00` 打开逻辑通道；
-- 发送 `GET DATA [BF 3E]` 指令并进行 ASN.1 DER 解码，精准提取卡片 32 位 EID（Tag `0x5A`）；
-- 在基带状态从 `NOT_READY` 转换到 `LOADED` 过程中具备指数退避与安全重试能力。
+- 支持 `GET DATA [BF 3E]`（及 `BF 2E` 兼容响应）ASN.1 DER 解码提取 32 位数字 EID（Tag `0x5A`）；
+- 即使物理卡槽 2 中的实体 eSIM 卡为**全新空白卡**（0 个已下载套餐、无活跃 ICCID、`SubscriptionInfo` 为空、`SIM_STATE_NOT_READY`），只要通过 ISD-R 真卡校验，系统设置中的 eSIM 开关与「管理 eSIM」入口即保持可用，允许用户顺畅写入第一张套餐。
 
 ### 3. Fail-Closed 实体卡类型安全守护（`CardTypeGuard`）
-为防止用户在 SIM2 插回普通手机卡时系统产生混乱，`CardTypeGuard` 实现了严格的**失效关闭**（Fail-Closed）安全策略：
-- 监听卡槽状态变化广播（`ACTION_SIM_CARD_STATE_CHANGED`）；
-- 异步向 SIM2 发送 ISD-R AID 握手探测；
-- 若卡片无法响应 ISD-R 或为非 eUICC 普通 SIM 卡，`CardTypeGuard` 立即判定 `eUICC = false`，禁止系统执行任何 eSIM 相关逻辑，保持 SIM2 原生 UICC 通信正常；
-- **隐私保护原则**：系统 Secure 设置中绝不存储明文 ICCID 或 EID，仅存储 SHA-256 校验摘要（`xiaomi_esim_h4_verified_iccid`、`xiaomi_esim_h4_verified_eid`）。
+为防止用户在 SIM2 插回普通手机卡（移动/联通/电信普通 USIM）时受到任何干扰，`CardTypeGuard` 严格执行**失效关闭（Fail-Closed）**策略：
+- 监听卡槽状态广播并异步向 SIM2 发起 ISD-R AID 握手验证；
+- 普通 SIM 卡返回 `NO_SUCH_ELEMENT` 时立即判定 `eUICC = false`，绝不误判为 eSIM，绝不修改或停用普通 SIM 卡；
+- **隐私保护原则**：`Settings.Secure` 中绝不保存明文 ICCID 或 EID，仅保存 SHA-256 摘要（`xiaomi_esim_h4_verified_iccid`、`xiaomi_esim_h4_verified_eid`）。
 
 ### 4. SIM1 射频与网络彻底隔离（拦截 OEM GPIO 切换）
-小米官方板载 eSIM 逻辑在激活时会通过底层硬件 GPIO 切断物理 SIM1 的射频通路。对于双实体卡槽机型，这会导致用户的 SIM1 主卡瞬间断网无服务。
-`CompatModule` 对 `com.android.phone` 与 `com.miui.euicc` 进行了深度拦截：
-- Hook `QcMiuiEsimManager`、`MiuiPhoneInterfaceManager` 以及 `XmLPAService`；
-- 拦截并短路 OEM GPIO/RF 切换方法（`setSimType`、`switchSlot`、`isSupportEsim`）；
-- 确保 SIM1 主卡在 eSIM 启停、配置切换、EID 读取过程中始终保持 5G/4G/VoLTE 稳定连接，不受丝毫干扰。
+小米板载 eSIM 机型在激活 eSIM 时会通过底层 GPIO 切换物理卡槽射频通路。`CompatModule` 深度拦截 `QcMiuiEsimManager`、`MiuiPhoneInterfaceManager` 与 `XmLPAService` 中的硬件切换方法（`setSimType`、`switchSlot`、`isSupportEsim`），确保 **SIM1 主卡 5G/4G/VoLTE 全程零断流、零干扰**。
 
 ---
 
 ## 安全架构与测试红线约束
 
-### 实体在用 ESTKme 卡安全红线
-针对插有真实在用 eSIM profile 的 ESTKme 卡片，本项目在设计之初即设立了严格的**测试安全红线**：
+针对插有真实商业套餐的实体 eSIM 卡，本项目内置多重非破坏性验证保护：
 
 | 红线规则 | 实现约束 |
 |---|---|
-| **严禁未经授权写卡** | 任何携带 `BF 36`（LoadBoundProfilePackage）或 `BF 34`（EuiccMemoryReset）的 APDU 指令被三层校验阻断，无法下发至物理卡闪存。 |
-| **严禁删除卡内配置** | 阻断 `BF 33`（DeleteProfile）标签，避免在测试中误删用户商业套餐。 |
-| **非破坏性验证** | 所有下载验证流程全部定向至本地模拟域名 `test.esim.local`，仅在内存层走通流程。 |
+| **严禁测试态写卡/重置** | 针对 `test.esim.local` 模拟测试流程，严格拦截 `BF 36`（LoadBoundProfilePackage）与 `BF 34`（EuiccMemoryReset），绝不写入物理卡闪存。 |
+| **严禁未经授权删卡** | 模拟测试全程在内存层完成授权弹窗与回调验证，卡内现有真实套餐 100% 原样保留。 |
+| **状态完整可逆还原** | 模块关闭、禁用或卸载时，通过 `/data/adb/xiaomi-esim-hyperos4/` 备份与 `restore-guard.sh` 自动还原全部系统设置与属性。 |
 
 ---
 
-## 支持设备与系统版本
+## 支持设备、系统与实体卡列表
 
-- **验证基准机型**：Xiaomi MIX Flip 2（代号 `bixi`，测试序列号 `f3d6d3d0`）。
-- **支持操作系统**：Xiaomi HyperOS 4（基于 Android 15、Android 16、Android 17 / API 35+）。
-- **通用机型支持**：代码中已消除所有硬编码设备代号，适配所有 HyperOS 4 双卡小米机型。
-- **实体 eSIM 卡**：ESTKme 及其兼容系列可插拔实体 eUICC（必须放置在 **SIM 卡槽 2**）。
+- **已验证机型**：
+  - **Xiaomi MIX Flip 2**（`bixi`，HyperOS 4 / Android 17 API 37）
+  - **REDMI K90 Pro Max**（`myron`，HyperOS 4 `OS4.0.6.0.XPMCNXM` / Android 17 API 37）
+  - **通用支持**：无硬编码机型限制，适配所有运行 **Xiaomi HyperOS 4（Android 15 / 16 / 17，SDK 35+）** 的双物理卡槽小米 / REDMI 机型。
+- **支持的可插拔实体 eSIM 卡（必须插入物理 SIM 卡槽 2）**：
+  - **ESTKme** 全系列可插拔实体 eUICC
+  - **小白卡**、**携程 / JoyTel 实体白卡**
+  - **9eSIM**、**Xesim**、**5ber** 及其他符合 **GSMA SGP.22 标准（支持 EasyEUICC）** 的可插拔实体 eSIM 卡（支持已写卡与**全新空白卡**）。
 
 ---
 
@@ -135,85 +153,84 @@ A0 00 00 05 59 10 10 FF FF FF FF 89 00 00 01 00
 
 ```
 work/esim-adapt/
-├── .gitignore                      # Git 忽略配置（忽略构建缓存、私钥等）
+├── .gitignore                      # Git 忽略规则
 ├── LICENSE                         # Apache 2.0 开源协议
 ├── README.md                       # 中英双语完整技术文档
-├── build_module.py                 # Magisk/KernelSU 刷机包自动化打包脚本
-├── finalize_release.py             # 发布完整性校验脚本（10 项发布断言）
+├── build_module.py                 # KernelSU / SukiSU / Magisk 模块自动化打包脚本 (v0.5.0)
+├── finalize_release.py             # 发布产物完整性校验与 SHA256 生成脚本
 ├── prebuilt/
-│   └── MIUIEsimLPA.apk             # 提取自官方 HyperOS 4 固件的未修改原版 LPA (v4.1.0.1)
+│   └── MIUIEsimLPA.apk             # 提取自官方 HyperOS 4 固件的未修改原版小米 LPA (v4.1.0.1)
 ├── probe/                          # Android Studio Gradle 工程
-│   ├── app/                        # LSPosed 核心桥接模块 (io.github.local.esimh4probe)
+│   ├── app/                        # LSPosed 核心桥接与诊断模块 (io.github.jabe1122.esimh4probe)
 │   │   └── src/main/java/io/github/local/esimh4probe/
-│   │       ├── CompatModule.java       # LibXposed 入口与 APDU 通道路由
-│   │       ├── CardTypeGuard.java      # Fail-closed ISD-R AID 探测与防护
-│   │       ├── EuiccCardReader.java    # OMAPI 读卡器交互与 ASN.1 EID 解码
-│   │       ├── Sim2Subscription.java   # 卡2订阅映射与状态同步
-│   │       ├── Sim2Control.java        # CLI 诊断与状态辅助工具
-│   │       ├── LpaBridgeActivity.java  # LPA 扫码与 Intent 桥接
-│   │       └── MainActivity.java       # 模块本地诊断界面
-│   └── tester/                     # 独立安全模拟测试应用 (io.github.local.esimh4tester)
+│   │       ├── CompatModule.java       # LibXposed 入口、APDU 路由与多机型适配
+│   │       ├── CardTypeGuard.java      # Fail-closed ISD-R AID 探测（含空白卡支持）
+│   │       ├── EuiccCardReader.java    # 双通道探测与 EID 摘要工具
+│   │       ├── Sim2Subscription.java   # 卡2订阅解析与可选空卡状态兼容
+│   │       ├── Sim2Control.java        # Root CLI 状态探测与同步工具
+│   │       ├── LpaBridgeActivity.java  # LPA:// 链接与扫码激活 Intent 桥接
+│   │       └── MainActivity.java       # 本地诊断面板与 ESIM_PROBE CLI
+│   └── tester/                     # 独立模拟运营商写卡测试应用 (io.github.local.esimh4tester)
 │       └── src/main/java/io/github/local/esimh4tester/
-│           └── TesterActivity.java     # 模拟运营商下载与弹窗验证 Activity
-└── outputs/                        # 构建发布产物目录（ZIP 包、APK、SHA256 校验单）
+│           └── TesterActivity.java     # 权限挂载自检与一键写卡弹窗模拟验证
+└── outputs/                        # 构建发布产物目录
 ```
 
 ---
 
 ## 安装与部署指南
 
-### 第一步：刷入 Magisk / KernelSU 模块
-1. 前往 Release 发布产物目录下载 `XiaomiEsimLPA-HyperOS4-bixi-v0.4.0.zip`。
-2. 打开 KernelSU / Magisk / APatch 管理器，选择从本地安装刷入该 ZIP。
-3. 模块安装脚本会自动对系统当前状态进行只读备份，存放于 `/data/adb/xiaomi-esim-hyperos4/`（权限 `0700`）。
+### 第一步：（仅 KernelSU / SukiSU 用户）确认已启用系统挂载元模块
+1. 如果您使用 **KernelSU（v2.0+）** 或 **SukiSU Ultra**，请先确认已安装并启用 **`meta-overlayfs`** 或 **`magic_mount`** 元模块，且已重启生效。
+2. Magisk 与 APatch 用户可直接跳过此步。
+
+### 第二步：刷入模块 ZIP
+1. 下载最新发布包 `XiaomiEsimLPA-HyperOS4-v0.5.0.zip`。
+2. 打开 KernelSU / SukiSU / Magisk / APatch 管理器，从本地选择刷入该 ZIP。
+3. 安装脚本会自动校验挂载环境、清理历史异常 `/data/app` LPA 残留，并将系统原始设置备份至 `/data/adb/xiaomi-esim-hyperos4/`（权限 `0700`）。
 4. **重启手机**。
 
-### 第二步：配置 LSPosed 作用域
-1. 打开 LSPosed 管理器应用。
-2. 找到已安装的模块 **「HYPEROS4实体ESIM桥接」**（`io.github.jabe1122.esimh4probe`）。
-3. 勾选并确保以下作用域已启用：
+### 第三步：配置 LSPosed 作用域
+1. 打开 LSPosed 管理器，启用模块 **「HYPEROS4实体ESIM桥接」**（`io.github.jabe1122.esimh4probe`）。
+2. 确保勾选以下两个作用域（静态作用域已预置）：
    - `com.android.phone`（电话服务）
    - `com.miui.euicc`（小米 eSIM LPA）
-4. 请勿勾选无关系统应用。
 
-### 第三步：插入 ESTKme 并开启功能
-1. 将 ESTKme 卡放入手机 **SIM 卡槽 2**。
-2. 打开 KernelSU / Magisk → 进入本模块界面 → 点击 **「操作」**（Action）切换为开启。
-3. 重启手机。
-4. 进入系统设置 →「双卡与移动网络」→「eSIM」，此时系统即可正常读取 ESTKme 实体卡 EID 并管理配置。
+### 第四步：插入实体 eSIM 卡并开启模块功能
+1. 将实体 eSIM 卡（ESTKme / 小白卡 / 9eSIM / Xesim 等）放入手机 **SIM 卡槽 2**。
+2. 打开 KernelSU / SukiSU / Magisk → 找到 `Xiaomi eSIM LPA - HyperOS 4` → 点击 **「操作 (Action)」** 切换为开启状态。
+3. **重启手机**。
+4. 打开桌面上的 **「HYPEROS4实体ESIM桥接」** 确认显示 **`LPA 系统特权挂载：✅ 已生效`**，然后前往系统「设置 → 双卡与移动网络 → eSIM管理」即可读取 EID、添加新套餐（支持全新空白卡直接扫码写卡）或切换已有套餐。
 
 ---
 
 ## 模拟测试框架与非破坏性验证
 
-为了让开发者能够安全地验证全部 LPA 交互流程，模块附带了独立测试应用 `io.github.local.esimh4tester`：
-- 使用模拟激活码：`LPA:1$test.esim.local$MOCK_ACTIVATION_CODE`。
-- `TesterActivity` 调用 `EuiccManager.downloadSubscription` 后：
-  1. `CompatModule` 在 `EuiccController` 层拦截该域名请求；
-  2. `XmLPAService` 捕获模拟请求并唤起原厂一键授权弹窗 `DownloadConfirmDialogActivity`；
-  3. `DpDownloadOperation` 返回模拟安装成功；
-  4. **物理卡内的所有真实在用 eSIM profile 100% 保持原样，不发生任何闪存写入或擦除。**
+模块在开启状态下会自动部署独立测试应用 `io.github.local.esimh4tester`（关闭或卸载模块时自动卸载清理）：
+- 顶部状态面板实时检测 **LPA 系统特权挂载**、`FEATURE_TELEPHONY_EUICC`、`EuiccManager.isEnabled`、`defaultCardId`、**卡槽 2 实体卡状态（区分已启用套餐与空白卡）** 及 `LPA://` 跳转就绪情况。
+- 默认使用安全模拟激活码 `LPA:1$test.esim.local$MOCK-TEST-001` 调起小米原生授权弹窗 `DownloadConfirmDialogActivity`，底层自动拦截测试码，**100% 不向实体卡写入任何测试数据**。
 
 ---
 
 ## 源码构建指南
 
 ### 构建环境要求
-- JDK 21 (`jdk-21.0.13+9` 或更高版本)
-- Android SDK (API 35+ / SDK Build Tools 36.0.0)
-- Gradle 8.11.1
+- JDK 21+
+- Android SDK（API 35/36）
+- Gradle 8.11+
 - Python 3.10+
 
-### 一键构建与发布
+### 一键构建与打包
 ```bash
-# 1. 编译模块 APK 与测试应用 APK
 cd work/esim-adapt
-gradle -p probe :app:assembleDebug :tester:assembleDebug
 
-# 2. 自动化打包 KernelSU / Magisk 模块 ZIP
+# 1. 编译 LSPosed 桥接模块 APK 与模拟测试 APK
+gradle -p probe clean assembleDebug
+
+# 2. 生成 XiaomiEsimLPA-HyperOS4-v0.5.0.zip 刷机模块包
 python build_module.py
 
-# 3. 运行 10 项发布断言完整性校验并生成 SHA256SUMS.txt
+# 3. 执行发布完整性断言校验并生成 SHA256SUMS.txt
 python finalize_release.py
 ```
 
@@ -221,120 +238,92 @@ python finalize_release.py
 
 ## 安全须知与免责声明
 
-1. **Root 风险声明**：本模块需要 Root 权限以及 LSPosed 框架支持。请务必了解玩机风险。
-2. **商标与版权说明**：Xiaomi、HyperOS、MIUI、ESTKme、GSMA 等商标及产品名称归其各自所有者拥有。本项目为开源社区兼容性适配方案，与小米公司或 ESTKme 官方无隶属关系。
-3. **免责保证**：本项目按 Apache License 2.0 协议发布，作者对任何由于刷机或使用本模块产生的数据丢失或硬件故障不承担法律责任。
+1. **Root 风险声明**：本模块需要 Root 权限与 LSPosed 框架支持，刷机前请做好重要数据备份。
+2. **商标与独立性声明**：Xiaomi、REDMI、HyperOS、MIUI、ESTKme、9eSIM、Xesim、GSMA 等商标归各自权利人所有。本项目为独立洁净室（Clean-Room）开源兼容层实现，不含任何第三方受限残留代码，亦与上述厂商无隶属关系。
+3. **免责条款**：本项目按 Apache License 2.0 协议「原样」提供，不对因不当操作造成的任何损失承担责任。
 
 ---
 
 ## 开源协议与参与贡献
 
-本项目基于 **Apache License 2.0** 许可证开源。详细条款请参阅 [LICENSE](LICENSE) 文件。
-欢迎提交 Issue 与 Pull Request 共同改进 HyperOS 实体 eSIM 适配生态！
+本项目基于 **Apache License 2.0** 开源，详见 [LICENSE](LICENSE)。欢迎提交 Issue 与 Pull Request 反馈更多机型与实体 eSIM 卡片实测结果！
 
 ---
 ---
 
 # English Documentation
 
-## Overview
+## Overview & What's New in `v0.5.0`
 
-**HyperOS 4 Physical eSIM Adaptation** is a clean-room, production-grade integration and compatibility layer enabling physical removable eUICC smart cards (specifically **ESTKme** and compatible removable eSIM cards) to function seamlessly with Xiaomi HyperOS 4 (Android 15 / 16 / 17, API 35+) and official system LPA services (`com.miui.euicc`).
+**HyperOS 4 Removable Physical eSIM Adaptation (`v0.5.0`)** is a clean-room, system-level compatibility and bridging module for Xiaomi and REDMI devices running **Xiaomi HyperOS 4 (Android 15 / 16 / 17, SDK 35+)**. It enables standard **GSMA SGP.22 removable eUICC cards**—including **ESTKme** as well as EasyEUICC-compatible cards such as **Xiaobai (小白卡), Ctrip/JoyTel white cards, 9eSIM, Xesim, and 5ber**—installed in **physical SIM Slot 2** to work natively with Xiaomi's unmodified stock LPA (`MIUIEsimLPA.apk` v4.1.0.1).
 
-Traditionally, Chinese-mainland Xiaomi devices (such as Xiaomi MIX Flip 2 `bixi`) lack native eSIM hardware or restrict system-level eSIM features to specific carrier eSIM hardware profiles. This solution provides:
-1. **Full System-Level eSIM Capability**: Exposes standard Android `android.hardware.telephony.euicc` system feature declarations and integrates the genuine, unmodified Xiaomi HyperOS 4 LPA (`MIUIEsimLPA.apk` v4.1.0.1) without tampering with OEM platform signatures.
-2. **Transparent Hardware Bridging**: Routes logical channel APDUs from the Android framework directly to SIM slot 2 via OMAPI `SEService`, bypassing modem RIL channel limitations.
-3. **Fail-Closed Hardware Protection**: Guarantees that ordinary non-eUICC SIM cards inserted in SIM2 are never misidentified or disrupted.
-4. **Primary SIM1 Radio Isolation**: Completely protects SIM slot 1 (user's primary cellular service) by neutralizing OEM RF/GPIO antenna-multiplexer switches.
-5. **Zero Upstream Residue**: Completely independent, modern object-oriented implementation, free of legacy or third-party proprietary code.
+### Key Highlights in `v0.5.0`
+1. **Universal SGP.22 Removable eUICC & Brand-New Empty Card Support**:
+   - Supports **ESTKme** and EasyEUICC-compatible removable eUICC cards (**Xiaobai / JoyTel / 9eSIM / Xesim / 5ber**, etc.).
+   - **First-Profile Write on Empty Cards**: Brand-new removable eUICC cards with zero profiles (no active ICCID, no `SubscriptionInfo`, `SIM_STATE_NOT_READY`) keep the system eSIM toggle and "Manage eSIM" entry active without throwing `"Physical SIM2 subscription unavailable"`.
+2. **ISO-7816-4 Segmented APDU (`61XX` / `6CXX`) & Dual-Channel (OMAPI + RIL) Fallback**:
+   - Handles chained `61 XX` (`GET RESPONSE` `00 C0 00 00 XX`) and `6C XX` (`Le` retry) responses, as well as `BF3E` / `BF2E` `GET EID` payloads.
+   - Automatically falls back to **Telephony RIL logical channels** (`iccOpenLogicalChannelBySlot(1, ISDR_AID, 0)`) when OMAPI `SEService` is unavailable or blocked by missing ARA-M rules.
+3. **Multi-Device HyperOS 4 Support (`MIX Flip 2`, `REDMI K90 Pro Max`, etc.)**:
+   - Works seamlessly across devices without factory eSIM declarations (e.g., **Xiaomi MIX Flip 2** `bixi`, `cardId=1`) and devices whose stock `/vendor` includes `euicc.mep.xml` (e.g., **REDMI K90 Pro Max** `myron`, `cardId=5`), including localized dialog whitespace variations.
+4. **KernelSU / SukiSU System-Mount Guard & Self-Repair**:
+   - Eliminates the unmounted `/data/app` trap where `com.miui.euicc` lost privileged permissions (`BIND_EUICC_SERVICE`, `SECURE_ELEMENT_PRIVILEGED_OPERATION`, `MODIFY_PHONE_STATE`). Automatically detects and cleans up unprivileged `/data/app` installs, exposes `sys.xiaomi_esim_h4.mount_ok`, and displays prominent privilege-mount diagnostics in both `MainActivity` and `TesterActivity`.
+
+---
+
+## ⚠️ Mandatory Metamodule Guide for KernelSU / SukiSU Users
+
+> **CRITICAL REQUIREMENT**: Xiaomi's unmodified `MIUIEsimLPA.apk` (`com.miui.euicc`) **must** be mounted as a privileged system app at `/product/priv-app/MIUIEsimLPA/MIUIEsimLPA.apk` alongside `/product/etc/permissions/privapp-permissions-euicc.xml` so Android grants `FLAG_SYSTEM`, `BIND_EUICC_SERVICE`, `SECURE_ELEMENT_PRIVILEGED_OPERATION`, and `MODIFY_PHONE_STATE`. Installing `MIUIEsimLPA.apk` into `/data/app` without a system overlay strips all privileged eSIM permissions.
+
+- **KernelSU (v2.0+ / v3.0+) & SukiSU Ultra (v4.x+) Users**:
+  1. Modern KernelSU and SukiSU Ultra require a **system-mount metamodule** to mount `system/product/...` overlays. You **must install and enable an active metamodule**—such as **`meta-overlayfs`** or **`magic_mount`** (`/data/adb/metamodule`)—and reboot **before** flashing this module.
+  2. In `v0.5.0`, `customize.sh` automatically blocks installation on KernelSU/SukiSU when no active metamodule is present, and repairs any prior unprivileged `/data/app` `com.miui.euicc` residue.
+  3. After enabling the module and rebooting, open the diagnostic app or mock tester app and verify the top line reads:
+     `LPA 系统特权挂载：✅ 已生效` (`lpaPrivMounted=true`).
+- **Magisk (v20.4+) & APatch Users**: Built-in magic/overlay mounting works out of the box—no extra metamodule is needed.
 
 ---
 
 ## Core Adaptation Principles
 
-### 1. Transparent OMAPI `SEService` Bridging (SIM2)
-Under HyperOS 4, the native cellular Telephony RIL daemon frequently rejects opening logical channels for removable SIM trays when queried with GSMA eUICC identifiers. This project intercepts low-level APDU transmissions within `CompatModule` and establishes a transparent proxy to the Android Open Mobile API (`android.se.omapi.SEService`):
-- Targets the **SIM2** physical smart card reader (`SIM2` / `slot 1`).
-- Allocates unique virtual logical channel IDs starting at **`12000+`** (e.g., 12000, 12001, etc.).
-- Multiplexes virtual channel IDs to underlying OMAPI channel sessions with strict lifecycle synchronization, preventing handle leakage and channel contention.
+### 1. Dual-Channel SIM2 Bridging (OMAPI `SEService` + Telephony RIL)
+- Routes framework and LPA APDU sessions to **physical SIM Slot 2 (`SIM2` / slot index `1`)** using isolated virtual channel IDs starting at **`12000+`**.
+- Reassembles ISO-7816-4 `61 XX` segmented responses and retries `6C XX` length hints cleanly without double-fetching.
+- Falls back to Telephony RIL logical channels when OMAPI is restricted, strictly closing channels in `finally` blocks to prevent handle leaks.
 
-```
-+--------------------------------------------------------------------+
-|  Android Framework / Third-party Apps / Official MIUIEsimLPA.apk   |
-+--------------------------------------------------------------------+
-                                  |
-                                  v
-+--------------------------------------------------------------------+
-|          CompatModule (LSPosed: com.android.phone / euicc)         |
-|  - Channel Router (Intercepts Telephony APDU requests)             |
-|  - Virtual Channel ID Pool (12000+)                                |
-+--------------------------------------------------------------------+
-           |                                         |
-           | (Native RIL Failed / Fallback)          | (Standard UICC)
-           v                                         v
-+-----------------------------+           +--------------------------+
-|  OMAPI SEService Bridge     |           | Native Telephony RIL     |
-|  Reader: "SIM2"             |           | Physical Slot 0 (SIM1)   |
-+-----------------------------+           +--------------------------+
-           |                                         |
-           v                                         v
-+-----------------------------+           +--------------------------+
-| ESTKme Removable eUICC Card |           | Carrier SIM1 Card        |
-| Physical Slot 2 (Protected) |           | Untouched & Isolated     |
-+-----------------------------+           +--------------------------+
-```
+### 2. Fail-Closed `CardTypeGuard` & Empty-Card Support
+- Probes SIM2 against the GSMA SGP.22 ISD-R AID (`A0000005591010FFFFFFFF8900000100`).
+- **Fail-Closed Safety**: Ordinary non-eUICC SIM cards returning `NO_SUCH_ELEMENT` are immediately classified as normal SIMs (`eUICC = false`) and are never altered or disabled.
+- **Empty eUICC Support**: Genuine removable eUICC cards with zero profiles remain recognized and switchable so users can download their first profile directly in Xiaomi's native UI.
+- **Privacy**: Only SHA-256 digests (`xiaomi_esim_h4_verified_iccid`, `xiaomi_esim_h4_verified_eid`) are stored in `Settings.Secure`—never plaintext identifiers.
 
-### 2. SGP.22 ISD-R AID Logical Channel Management
-The GSMA SGP.22 standard mandates communicating with the Issuer Security Domain Root (ISD-R) application using AID:
-```
-A0 00 00 05 59 10 10 FF FF FF FF 89 00 00 01 00
-```
-`CompatModule` manages the initialization sequence:
-- Probes and establishes logical channels using P2 parameter `0x00`.
-- Executes ASN.1 DER parsing against `GET DATA [BF 3E]` to retrieve the 32-digit EID (Tag `0x5A`).
-- Incorporates automatic fallbacks when modem states fluctuate between `NOT_READY` and `LOADED`.
-
-### 3. Fail-Closed `CardTypeGuard`
-To prevent accidents when users swap cards, `CardTypeGuard` implements a strict **fail-closed** verification state machine:
-- Probes SIM slot 2 upon card state transitions (`ACTION_SIM_CARD_STATE_CHANGED`).
-- Verifies that the card legitimately responds to the ISD-R AID.
-- If an ordinary SIM card (e.g., standard China Mobile / China Telecom / China Unicom SIM) is detected, `CardTypeGuard` immediately reports `eUICC = false`, aborts eSIM initialization, and prevents the system from disabling UICC communications on SIM2.
-- **Privacy Assurance**: Plaintext ICCID and EID are never stored in Android settings. Only SHA-256 digests (`xiaomi_esim_h4_verified_iccid`, `xiaomi_esim_h4_verified_eid`) are retained in secure settings for identity matching.
-
-### 4. SIM1 Radio Isolation (Neutralizing OEM GPIO Switching)
-Official Xiaomi devices equipped with factory-embedded eSIMs physically disconnect or reroute radio-frequency paths away from physical SIM1 via GPIO switches whenever eSIM mode is enabled.
-On dual-SIM tray devices adapted with ESTKme in SIM2, triggering this factory OEM logic would cause SIM1 to lose signal completely. `CompatModule` hooks `com.android.phone` and `com.miui.euicc`:
-- Hooks `QcMiuiEsimManager`, `MiuiPhoneInterfaceManager`, and `XmLPAService`.
-- Intercepts and drops OEM GPIO switching calls (`setSimType`, `switchSlot`, `isSupportEsim`).
-- Guarantees 100% continuous cellular, VoLTE, and data service on SIM1.
+### 3. Primary SIM1 Radio Isolation
+- Neutralizes OEM GPIO/antenna-multiplexer calls (`setSimType`, `switchSlot`, `isSupportEsim`) in `com.android.phone` and `com.miui.euicc`, ensuring continuous 5G/4G/VoLTE service on SIM1.
 
 ---
 
 ## Security Architecture & Safety Red Lines
 
-### Absolute Red Lines for ESTKme Removable Cards
-When developing or testing with removable physical eSIM cards containing live, in-use user profiles, **accidental card overwriting or memory wiping must be strictly prevented**.
-
-| Red Line Rule | Implementation Mechanism |
+| Safety Rule | Enforcement |
 |---|---|
-| **Zero Unauthorized Writes** | CLA/INS `80 E2` (STORE DATA) carrying tags `BF 36` (LoadBoundProfilePackage) or `BF 34` (EuiccMemoryReset) are blocked from reaching physical flash. |
-| **Zero Profile Deletion** | Tag `BF 33` (DeleteProfile) is blocked unless verified in an explicit user-authorized recovery session. |
-| **Non-Destructive Testing** | All profile installation and authorization UI flows are validated against the mock carrier domain `test.esim.local`. |
+| **Zero Unauthorized Writes in Mock Mode** | Mock activation domain `test.esim.local` intercepts download flows before any `BF 36` (`LoadBoundProfilePackage`) or `BF 34` (`EuiccMemoryReset`) APDU reaches physical card flash. |
+| **No Unprivileged LPA Poisoning** | `customize.sh`, `service.sh`, and `action.sh` never `pm install` `com.miui.euicc` as a user app and automatically purge any unprivileged `/data/app` residue. |
+| **Full State Reversibility** | Disabling or uninstalling restores all backed-up settings and properties via `/data/adb/xiaomi-esim-hyperos4/` and `restore-guard.sh`. |
 
 ---
 
-## Supported Devices & System Requirements
+## Supported Devices, OS & Removable eSIM Cards
 
-### Hardware & Software Compatibility
-- **Primary Tested Device**: Xiaomi MIX Flip 2 (codenamed `bixi`, serial `f3d6d3d0`).
-- **Target OS**: Xiaomi HyperOS 4 (Android 15, Android 16, Android 17 / SDK 35, 36, 37).
-- **Generic Support**: Clean-room implementation without hardcoded device codenames. Fully functional across all HyperOS 4 dual-physical-SIM devices.
-- **SIM Card Hardware**: ESTKme removable eUICC (placed in **SIM slot 2**).
-
-### Root & Hook Environment
-- **Root Solution**: KernelSU, Magisk (v20.4+), or APatch.
-  - *Note for KernelSU*: Requires an active metamodule (e.g., `meta-overlayfs`) to support system partition overlay mounting.
-- **Xposed Framework**: LSPosed (API 101+ compatible with Android 15/16/17).
+- **Verified Devices**:
+  - **Xiaomi MIX Flip 2** (`bixi`, HyperOS 4 / Android 17 SDK 37)
+  - **REDMI K90 Pro Max** (`myron`, HyperOS 4 `OS4.0.6.0.XPMCNXM` / Android 17 SDK 37)
+  - **Generic Compatibility**: Any dual-physical-SIM Xiaomi / REDMI phone running **Xiaomi HyperOS 4 (Android 15, 16, or 17 / SDK 35+)**.
+- **Supported Removable eUICC Cards (in SIM Slot 2)**:
+  - **ESTKme** (all models)
+  - **EasyEUICC-compatible / Standard GSMA SGP.22 removable eUICC cards**: **Xiaobai (小白卡)**, **Ctrip / JoyTel removable eSIM**, **9eSIM**, **Xesim**, **5ber**, etc. (both pre-provisioned and brand-new empty cards).
+- **Root & Xposed Environment**:
+  - **Magisk v20.4+**, **APatch**, or **KernelSU / SukiSU Ultra with an active metamodule (`meta-overlayfs` / `magic_mount`)**.
+  - **LSPosed** (LibXposed API 101+, scopes: `com.android.phone` and `com.miui.euicc`).
 
 ---
 
@@ -342,88 +331,44 @@ When developing or testing with removable physical eSIM cards containing live, i
 
 ```
 work/esim-adapt/
-├── .gitignore                      # Comprehensive git ignore rules
-├── LICENSE                         # Apache 2.0 Open Source License
-├── README.md                       # Bilingual project documentation
-├── build_module.py                 # Automated Magisk/KernelSU packaging script
-├── finalize_release.py             # Release integrity validator & checksum generator
+├── .gitignore
+├── LICENSE
+├── README.md
+├── build_module.py                 # Builds XiaomiEsimLPA-HyperOS4-v0.5.0.zip
+├── finalize_release.py             # Release integrity validator & SHA256 generator
 ├── prebuilt/
-│   └── MIUIEsimLPA.apk             # Official unmodified Xiaomi HyperOS 4 LPA (v4.1.0.1)
-├── probe/                          # Android Studio Gradle Project
-│   ├── build.gradle.kts            # Root Gradle build configuration
-│   ├── settings.gradle.kts         # Subproject declarations
-│   ├── app/                        # LSPosed Bridge Module (io.github.local.esimh4probe)
-│   │   └── src/main/java/io/github/local/esimh4probe/
-│   │       ├── CompatModule.java       # Core LibXposed hook entry & APDU router
-│   │       ├── CardTypeGuard.java      # Fail-closed ISD-R AID validator
-│   │       ├── EuiccCardReader.java    # OMAPI reader & ASN.1 EID extraction
-│   │       ├── Sim2Subscription.java   # Subscription mapping & slot binding
-│   │       ├── Sim2Control.java        # CLI diagnostic & state helper
-│   │       ├── LpaBridgeActivity.java  # LPA intent and activation bridge
-│   │       └── MainActivity.java       # Module diagnostic UI
-│   └── tester/                     # Mock Carrier Testing App (io.github.local.esimh4tester)
-│       └── src/main/java/io/github/local/esimh4tester/
-│           └── TesterActivity.java     # Safe mock profile download & UI dispatcher
-└── outputs/                        # Final distribution artifacts (ZIPs, APKs, Hashes)
+│   └── MIUIEsimLPA.apk             # Unmodified Xiaomi HyperOS 4 LPA (v4.1.0.1)
+├── probe/
+│   ├── app/                        # LSPosed Module & Diagnostics UI (io.github.jabe1122.esimh4probe)
+│   └── tester/                     # Standalone Mock Carrier App (io.github.local.esimh4tester)
+└── outputs/                        # Release ZIPs, APKs, and checksums
 ```
 
 ---
 
 ## Installation & Deployment Guide
 
-### Step 1: Install Magisk / KernelSU Module
-1. Download `XiaomiEsimLPA-HyperOS4-bixi-v0.4.0.zip` from the release artifacts.
-2. In KernelSU / Magisk / APatch, select **Install from storage** and flash the ZIP.
-3. The installer creates a backup of current settings in `/data/adb/xiaomi-esim-hyperos4/` (file mode `0700`).
-4. **Reboot the device**.
-
-### Step 2: Configure LSPosed Scopes
-1. Open the LSPosed Manager.
-2. Locate the installed **HYPEROS4实体ESIM桥接** (`io.github.jabe1122.esimh4probe`).
-3. Enable the module and select the following scopes:
-   - `com.android.phone` (Phone Services)
-   - `com.miui.euicc` (Xiaomi eSIM LPA)
-4. Do **not** check unrelated system apps.
-
-### Step 3: Insert ESTKme & Activate
-1. Insert your ESTKme card into **SIM Slot 2**.
-2. Open KernelSU / Magisk → `Xiaomi eSIM LPA - HyperOS 4` → tap **Action**.
-3. Toggle mode to **ON**.
-4. Reboot the device.
-5. Navigate to `Settings` → `Mobile Networks` → `eSIM`. Your ESTKme EID and profiles will now be fully accessible.
+1. **(KernelSU / SukiSU Only)** Install and enable **`meta-overlayfs`** or **`magic_mount`** first and reboot so `/data/adb/metamodule` is active.
+2. Flash **`XiaomiEsimLPA-HyperOS4-v0.5.0.zip`** in Magisk / KernelSU / SukiSU / APatch Manager and **reboot**.
+3. In **LSPosed Manager**, enable **HYPEROS4实体ESIM桥接** (`io.github.jabe1122.esimh4probe`) for `com.android.phone` and `com.miui.euicc`.
+4. Insert your removable eSIM card (ESTKme / Xiaobai / 9eSIM / Xesim, etc.) into **SIM Slot 2**.
+5. In your root manager, tap **Action** on `Xiaomi eSIM LPA - HyperOS 4` to switch mode to **ON**, then **reboot**.
+6. Verify `LPA 系统特权挂载：✅ 已生效` in the module app, then manage eSIM profiles natively under `Settings → Mobile Networks → eSIM`.
 
 ---
 
 ## Mock Testing Framework
 
-The repository includes a dedicated test suite (`probe/tester`) and mock carrier architecture:
-- Target mock domain: `test.esim.local`.
-- When `TesterActivity` initiates `EuiccManager.downloadSubscription` using an activation code like `LPA:1$test.esim.local$MOCK_TOKEN`:
-  1. `CompatModule` intercepts the request at `EuiccController`.
-  2. `XmLPAService` intercepts the metadata discovery and presents the genuine Xiaomi `DownloadConfirmDialogActivity`.
-  3. `DpDownloadOperation` simulates a successful profile download in memory.
-  4. **The physical ESTKme card is 100% untouched.**
+When `MODE=on`, the standalone app `io.github.local.esimh4tester` lets you safely verify carrier `EuiccManager.downloadSubscription`, `LPA://` deep links, and `ACTION_START_EUICC_ACTIVATION` using `LPA:1$test.esim.local$MOCK-TEST-001` without modifying any real profile on your physical eUICC card.
 
 ---
 
 ## Building from Source
 
-### Prerequisites
-- JDK 21 (`jdk-21.0.13+9` or newer)
-- Android SDK (API 35+ / SDK Build Tools 36.0.0)
-- Gradle 8.11.1
-- Python 3.10+
-
-### Compilation & Packaging
 ```bash
-# 1. Compile debug and release APKs
 cd work/esim-adapt
-gradle -p probe :app:assembleDebug :tester:assembleDebug
-
-# 2. Package the KernelSU/Magisk flashable ZIP
+gradle -p probe clean assembleDebug
 python build_module.py
-
-# 3. Validate release assertions and generate SHA256SUMS.txt
 python finalize_release.py
 ```
 
@@ -431,22 +376,12 @@ python finalize_release.py
 
 ## Disclaimers & Safety Notice
 
-1. **Root Privilege Notice**: This project requires root access and Xposed framework injection. Use at your own risk.
-2. **Third-Party Trademarks**: Xiaomi, HyperOS, MIUI, ESTKme, and GSMA are trademarks of their respective owners. This project is an independent community adaptation and is not affiliated with or endorsed by Xiaomi Inc. or ESTKme.
-3. **No Warranty**: This software is distributed under the Apache License 2.0 without warranties or conditions of any kind.
+1. **Root Access**: Requires root privileges and LSPosed. Use at your own risk.
+2. **Trademarks**: Xiaomi, REDMI, HyperOS, MIUI, ESTKme, 9eSIM, Xesim, and GSMA are trademarks of their respective owners. This clean-room open-source project contains zero proprietary upstream residue and is unaffiliated with those vendors.
+3. **No Warranty**: Provided "AS IS" under the Apache License 2.0.
 
 ---
 
 ## License
 
-This project is licensed under the **Apache License, Version 2.0**. See the [LICENSE](LICENSE) file for details.
-
-```
-Copyright 2026 HyperOS 4 eSIM Adaptation Contributors
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-```
+Licensed under the **Apache License, Version 2.0**. See [LICENSE](LICENSE) for details.
