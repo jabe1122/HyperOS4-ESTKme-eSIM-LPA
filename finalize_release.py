@@ -10,12 +10,12 @@ base = Path(__file__).resolve().parent
 out = base.parents[1] / 'outputs'
 apk = base / 'probe/app/build/outputs/apk/debug/app-debug.apk'
 tester_apk = base / 'probe/tester/build/outputs/apk/debug/tester-debug.apk'
-module = out / 'XiaomiEsimLPA-HyperOS4-v0.6.0.zip'
+module = out / 'XiaomiEsimLPA-HyperOS4-v0.6.1.zip'
 original_sha = '9daa20d489168264109d68532d27857a9eef7d7ce72199c565afb6b96d2e6b4f'
 sha = lambda data: hashlib.sha256(data).hexdigest()
 
 # Clean stale versioned artifacts in outputs/ so release directory stays unambiguous
-for old_item in out.glob('*v0.5.0*'):
+for old_item in out.glob('*v0.6.0*'):
     if old_item.is_file():
         old_item.unlink()
 
@@ -26,8 +26,8 @@ with zipfile.ZipFile(module) as z:
     assert 'lpa.apk' not in z.namelist()
     mod_prop = z.read('module.prop')
     assert b'author=Local HyperOS 4 eSIM Adaptation\n' in mod_prop
-    assert b'version=v0.6.0\n' in mod_prop
-    assert b'versionCode=600\n' in mod_prop
+    assert b'version=v0.6.1\n' in mod_prop
+    assert b'versionCode=601\n' in mod_prop
     assert z.read('compat.apk') == apk.read_bytes()
     assert z.read('tester.apk') == tester_apk.read_bytes()
     assert sha(z.read('system/product/priv-app/MIUIEsimLPA/MIUIEsimLPA.apk')) == original_sha
@@ -64,9 +64,9 @@ if (base / 'final-restored-list.xml').exists():
     )
     assert values('rename-original.xml', 'dialog_input_area') == ['RedteaGO']
 
-release_apk = out / 'Xiaomi-eSIM-Compat-v0.6.0.apk'
+release_apk = out / 'Xiaomi-eSIM-Compat-v0.6.1.apk'
 shutil.copy2(apk, release_apk)
-release_tester_apk = out / 'Xiaomi-eSIM-Tester-v0.6.0.apk'
+release_tester_apk = out / 'Xiaomi-eSIM-Tester-v0.6.1.apk'
 shutil.copy2(tester_apk, release_tester_apk)
 
 readme_out = out / 'README.md'
@@ -75,13 +75,15 @@ shutil.copy2(base / 'README.md', readme_out)
 user_guide_cn = out / '小米eSIM模块-使用说明.md'
 user_guide_text = '''# 小米 HyperOS 4 实体可插拔 eSIM 适配模块（Xiaomi eSIM LPA - HyperOS 4）
 
-版本：0.6.0（`versionCode=600`）；更新与实机验证日期：2026-11-11。
+版本：0.6.1（`versionCode=601`）；更新与实机验证日期：2026-11-11。
 
 面向搭载 **小米澎湃 HyperOS 4（Android 15 / 16 / 17，SDK 35+）** 的小米 / REDMI 双实体 SIM 卡机型（已完成 **Xiaomi MIX Flip 2 `bixi` `OS4.0.0.11.XOHCNXM`** 与 **REDMI K90 Pro Max `myron` `OS4.0.6.0.XPMCNXM`** 含原厂 `euicc.mep.xml` 环境兼容适配），支持将插入 **物理卡槽 2（SIM2）** 的 **ESTKme** 以及各类符合 GSMA SGP.22 标准的 **EasyEUICC 兼容可插拔实体 eSIM 卡（小白卡、携程/JoyTel 白卡、9eSIM、Xesim、5ber 等，含零套餐全新空白卡）** 桥接至原版未修改的小米系统原生 LPA（`MIUIEsimLPA.apk` v4.1.0.1）。
 
 ---
 
-## 核心功能与 `v0.6.0` 升级亮点
+## 核心功能与 `v0.6.1` 升级亮点
+
+- **免 Root 一键直达小米原生 eSIM 管理页（`v0.6.1` 修复）**：修复普通应用 UID 调用 `ACTION_MANAGE_EMBEDDED_SUBSCRIPTIONS` 被 `EuiccUiDispatcherActivity` 拦截 `MODIFY_PHONE_STATE` 权限的问题，直接前台拉起小米原生 `ProfileListActivity` 并增加 `com.android.phone` 特权代理兜底与未开启系统 eSIM 时的一键唤醒弹窗。
 
 - **Material Design 3 Expressive 动态取色控制中心与专属自适应图标**：遵循最新 Android 15–17 设计规范打造沉浸式壁纸动态取色（Material You）、深浅色自适应、分段圆角卡片（`24dp`/`6dp`）与带状态图标的自定义 `M3Switch` 胶囊开关，并配备全新设计的「SIM2 实体卡转无线 eSIM 桥接」自适应图标（含主题单色图标层）。
 - **SukiSU Ultra / KernelSU `ksu_handle_umount` 自动卸载免疫**：在验证 `/product/priv-app` 系统特权挂载（`FLAG_SYSTEM`）生效后自动同步 `/data/app` 更新层（`UPDATED_SYSTEM_APP`），彻底解决 SukiSU / KernelSU 默认卸载非 Root 应用（如系统相册、相机、浏览器）模块挂载导致的选二维码图片写卡闪退问题；关闭或卸载模块时通过 `pm uninstall-system-updates` 自动无损还原。
@@ -103,7 +105,7 @@ user_guide_text = '''# 小米 HyperOS 4 实体可插拔 eSIM 适配模块（Xiao
 
 ## 安装、升级与日常开关说明
 
-1. **刷入模块**：在已就绪的 Magisk / KernelSU / SukiSU / APatch 管理器中刷入 `XiaomiEsimLPA-HyperOS4-v0.6.0.zip` 并重启（全新安装默认 `MODE=off`，从旧版升级自动保留原有开关状态并同步最新组件）。
+1. **刷入模块**：在已就绪的 Magisk / KernelSU / SukiSU / APatch 管理器中刷入 `XiaomiEsimLPA-HyperOS4-v0.6.1.zip` 并重启（全新安装默认 `MODE=off`，从旧版升级自动保留原有开关状态并同步最新组件）。
 2. **启用 LSPosed 作用域**：在 LSPosed 管理器中启用 **HYPEROS4实体ESIM桥接**（包名：`io.github.jabe1122.esimh4probe`），勾选作用域 **`com.android.phone`** 与 **`com.miui.euicc`**。
 3. **开启桥接服务**：将可插拔实体 eSIM 卡放入 **物理卡槽 2（SIM2）**，打开桌面 **「HYPEROS4实体ESIM桥接」** 开启顶部主开关（或在 Root 管理器点击模块「操作 Action」），首次开启按提示重启手机即可。
 4. **日常管理**：
@@ -132,7 +134,7 @@ python finalize_release.py
 '''
 user_guide_cn.write_text(user_guide_text.replace('\r\n', '\n'), encoding='utf-8', newline='\n')
 
-source = out / 'XiaomiEsimLPA-HyperOS4-source-v0.6.0.zip'
+source = out / 'XiaomiEsimLPA-HyperOS4-source-v0.6.1.zip'
 with zipfile.ZipFile(source, 'w', zipfile.ZIP_DEFLATED) as z:
     z.write(base / 'build_module.py', 'build_module.py')
     z.write(base / 'finalize_release.py', 'finalize_release.py')
@@ -153,11 +155,11 @@ with zipfile.ZipFile(source) as z:
     assert z.testzip() is None
     assert not any('upstream' in n.lower() for n in z.namelist())
     assert z.read('README.md') == (base / 'README.md').read_bytes()
-    assert b'0.6.0' in z.read('USER_GUIDE_CN.md')
+    assert b'0.6.1' in z.read('USER_GUIDE_CN.md')
 
 report = {
-    'version': '0.6.0',
-    'versionCode': 600,
+    'version': '0.6.1',
+    'versionCode': 601,
     'date': '2026-11-11',
     'device': 'bixi / myron (multi-device HyperOS 4)',
     'build': 'OS4.0.0.11.XOHCNXM / OS4.0.6.0.XPMCNXM',
@@ -220,6 +222,6 @@ files = [
     out / '验证结果.json',
 ]
 (out / 'SHA256SUMS.txt').write_text(''.join(f'{sha(p.read_bytes())}  {p.name}\n' for p in files), encoding='utf-8')
-print('Release v0.6.0 validation passed; upstream removed; source excludes build caches and signing keys.')
+print('Release v0.6.1 validation passed; upstream removed; source excludes build caches and signing keys.')
 for p in files[:4]:
     print(p.name, p.stat().st_size)

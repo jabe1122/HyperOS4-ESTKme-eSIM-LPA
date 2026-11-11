@@ -25,7 +25,15 @@ public final class LpaBridgeActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         try {
-            int cardType = Settings.Secure.getInt(getContentResolver(), CardTypeGuard.KEY_CARD_TYPE, 0);
+            int cardType = Settings.Secure.getInt(getContentResolver(), CardTypeGuard.KEY_CARD_TYPE, -2);
+            if (cardType == -2) {
+                Bundle status = ProbeInspector.callPhoneCtrl(this, "status", null);
+                if (status != null && status.getBoolean("ok", false)) {
+                    cardType = status.getInt("card_type", 0);
+                } else {
+                    cardType = 0;
+                }
+            }
             if (!EuiccCardReader.isModuleActive() || cardType != 1) {
                 String msg = (EuiccCardReader.isModuleActive() && cardType == -1)
                         ? "正在识别卡槽2中的SIM卡类型，请稍候重试"

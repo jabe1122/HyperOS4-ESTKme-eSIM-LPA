@@ -5,7 +5,7 @@ import shutil
 import zipfile
 
 BASE = Path(__file__).resolve().parent
-parser = argparse.ArgumentParser(description='Build Xiaomi HyperOS 4 removable eSIM module (v0.6.0)')
+parser = argparse.ArgumentParser(description='Build Xiaomi HyperOS 4 removable eSIM module (v0.6.1)')
 parser.add_argument('--output-dir', type=Path, default=BASE.parents[1] / 'outputs')
 OUT = parser.parse_args().output_dir.resolve()
 MOD = BASE / 'module'
@@ -67,8 +67,8 @@ put('system/product/etc/permissions/privapp-permissions-euicc.xml', '''<?xml ver
 
 put('module.prop', '''id=XiaomiEsimLPAHyperOS4
 name=Xiaomi eSIM LPA - HyperOS 4
-version=v0.6.0
-versionCode=600
+version=v0.6.1
+versionCode=601
 author=Local HyperOS 4 eSIM Adaptation
 description=Removable eUICC (ESTKme / Xiaobai / 9eSIM / Xesim) in SIM2 on HyperOS 4. Native eSIM feature, Xiaomi LPA v4.1.0.1, Material 3 control switches, and SukiSU/KernelSU umount immunity.
 ''')
@@ -456,7 +456,7 @@ done
 mkdir -p /data/adb/service.d
 cp "$MODPATH/restore-guard.sh" /data/adb/service.d/xiaomi-esim-h4-restore.sh
 set_perm /data/adb/service.d/xiaomi-esim-h4-restore.sh 0 0 0755
-ui_print "- 版本 / Version: v0.6.0 (600)" 2>/dev/null || true
+ui_print "- 版本 / Version: v0.6.1 (601)" 2>/dev/null || true
 ui_print "- 适用范围 / Scope: HyperOS 4 (SDK 35+) / SIM2 可插拔实体 eSIM (ESTKme, 小白卡, 9eSIM, Xesim 等)" 2>/dev/null || true
 ui_print "- 重要提示 / Reminder: 请在 LSPosed 中确认已勾选启用 HYPEROS4实体ESIM桥接 (io.github.jabe1122.esimh4probe)！" 2>/dev/null || true
 ui_print "- SukiSU/KernelSU 提示: 推荐使用 Hybrid Mount 或 meta-overlayfs 元模块，内置内核 umount 自动免疫。" 2>/dev/null || true
@@ -663,7 +663,7 @@ MODDIR=${0%/*}
 read_mode
 read_umount_guard
 read_tester_enabled
-echo "version=v0.6.0"
+echo "version=v0.6.1"
 echo "mode=$MODE"
 echo "umount_guard=$UMOUNT_GUARD"
 echo "tester_enabled=$TESTER_ENABLED"
@@ -708,7 +708,7 @@ shutil.copy2(PREBUILT_LPA, lpa_target)
 shutil.copy2(COMPAT_APK, MOD / 'compat.apk')
 shutil.copy2(TESTER_APK, MOD / 'tester.apk')
 
-zip_path = OUT / 'XiaomiEsimLPA-HyperOS4-v0.6.0.zip'
+zip_path = OUT / 'XiaomiEsimLPA-HyperOS4-v0.6.1.zip'
 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
     for p in sorted(MOD.rglob('*')):
         if p.is_file():

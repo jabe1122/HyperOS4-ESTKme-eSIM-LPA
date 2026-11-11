@@ -6,8 +6,8 @@ android {
         applicationId = "io.github.jabe1122.esimh4probe"
         minSdk = 33
         targetSdk = 35
-        versionCode = 600
-        versionName = "0.6.0"
+        versionCode = 601
+        versionName = "0.6.1"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

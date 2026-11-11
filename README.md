@@ -1,7 +1,7 @@
 # 小米 HyperOS 4 可插拔实体 eSIM（ESTKme / 小白卡 / 9eSIM 等）系统级适配与桥接方案
-# HyperOS 4 Removable Physical eSIM (ESTKme / EasyEUICC-Compatible) Adaptation (`v0.6.0`)
+# HyperOS 4 Removable Physical eSIM (ESTKme / EasyEUICC-Compatible) Adaptation (`v0.6.1`)
 
-[![Version](https://img.shields.io/badge/Version-v0.6.0-brightgreen.svg)]()
+[![Version](https://img.shields.io/badge/Version-v0.6.1-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Android](https://img.shields.io/badge/Platform-HyperOS%204%20%7C%20Android%2015--17%20(SDK%2035%2B)-green.svg)]()
 [![Hardware](https://img.shields.io/badge/SIM2-ESTKme%20%7C%20Xiaobai%20%7C%209eSIM%20%7C%20Xesim-orange.svg)]()
@@ -12,7 +12,7 @@
 ## 目录 / Table of Contents
 
 - [中文说明文档](#中文说明文档)
-  - [项目概览与 v0.6.0 更新亮点](#项目概览与-v060-更新亮点)
+  - [项目概览与 v0.6.1 更新亮点](#项目概览与-v061-更新亮点)
   - [⚠️ KernelSU / SukiSU 用户必读：元模块选型与 umount 免疫机制](#️-kernelsu--sukisu-用户必读元模块选型与-umount-免疫机制)
   - [Material 3 控制中心与 7 项功能开关说明](#material-3-控制中心与-7-项功能开关说明)
   - [实体 eSIM 卡适配核心原理](#实体-esim-卡适配核心原理)
@@ -25,7 +25,7 @@
   - [安全须知与免责声明](#安全须知与免责声明)
   - [开源协议与参与贡献](#开源协议与参与贡献)
 - [English Documentation](#english-documentation)
-  - [Overview & What's New in v0.6.0](#overview--whats-new-in-v060)
+  - [Overview & What's New in v0.6.1](#overview--whats-new-in-v061)
   - [⚠️ KernelSU / SukiSU Metamodule Selection & umount Immunity](#️-kernelsu--sukisu-metamodule-selection--umount-immunity)
   - [Material Design 3 Control Panel & Feature Switches](#material-design-3-control-panel--feature-switches)
   - [Core Adaptation Principles](#core-adaptation-principles)
@@ -39,20 +39,22 @@
 
 # 中文说明文档
 
-## 项目概览与 `v0.6.0` 更新亮点
+## 项目概览与 `v0.6.1` 更新亮点
 
-**小米 HyperOS 4 可插拔实体 eSIM 适配与桥接方案（`v0.6.0`）** 是一套面向 Xiaomi / REDMI 澎湃 HyperOS 4（Android 15 / 16 / 17，API 35+）的开源系统级兼容层与桥接模块，专门解决各类符合 **GSMA SGP.22 标准的可插拔实体 eUICC 卡**（支持 EasyEUICC 的 **ESTKme、小白卡、携程/JoyTel 白卡、9eSIM、Xesim、5ber** 等，含零套餐全新空白卡）在国行双实体卡槽小米/红米机型上无法直接使用小米官方系统原生 LPA 写卡与管理套餐的难题。
+**小米 HyperOS 4 可插拔实体 eSIM 适配与桥接方案（`v0.6.1`）** 是一套面向 Xiaomi / REDMI 澎湃 HyperOS 4（Android 15 / 16 / 17，API 35+）的开源系统级兼容层与桥接模块，专门解决各类符合 **GSMA SGP.22 标准的可插拔实体 eUICC 卡**（支持 EasyEUICC 的 **ESTKme、小白卡、携程/JoyTel 白卡、9eSIM、Xesim、5ber** 等，含零套餐全新空白卡）在国行双实体卡槽小米/红米机型上无法直接使用小米官方系统原生 LPA 写卡与管理套餐的难题。
 
-### `v0.6.0` 核心升级内容
-1. **全新 Material Design 3 Expressive 动态取色界面与专属自适应图标**：
+### `v0.6.1` / `v0.6.0` 核心升级内容
+1. **免 Root 一键直达小米原生 eSIM 管理页修复（`v0.6.1`）**：
+   - 修复普通应用 UID 调用 `ACTION_MANAGE_EMBEDDED_SUBSCRIPTIONS` 被 Android 17 `EuiccUiDispatcherActivity` 拦截 `MODIFY_PHONE_STATE` 权限而误报挂载未生效的问题，改为前台直接拉起小米原生 `ProfileListActivity` 并辅以 `com.android.phone` 特权代理兜底与系统 eSIM 未开启时的一键唤醒确认弹窗。
+2. **全新 Material Design 3 Expressive 动态取色界面与专属自适应图标**：
    - 采用最新 Android 15–17 **Material You (`Monet`) 壁纸动态取色**、Edge-to-Edge 沉浸式系统栏、深浅色模式自适应、分段圆角设置卡片（`24dp`/`6dp`）以及带状态指示图标（`✓`/`✕`）的自定义高帧率胶囊开关。
    - 结合软件功能全新设计 **「物理卡槽 SIM2 → 无线 eSIM 桥接」自适应应用图标**，完整支持 Android 13–17 桌面主题单色图标（`monochrome`）。
-2. **SukiSU Ultra / KernelSU `ksu_handle_umount` 内核卸载自动免疫（双层驻留架构）**：
+3. **SukiSU Ultra / KernelSU `ksu_handle_umount` 内核卸载自动免疫（双层驻留架构）**：
    - 彻底解决 SukiSU Ultra / KernelSU 默认对普通应用（如系统相册、相机、浏览器）执行内核挂载卸载（`ksu_handle_umount: unmounting: /product/priv-app`）导致**从相册选择二维码写卡或外部拉起写卡时闪退**的问题。
    - 模块在严格确认 `/product/priv-app/MIUIEsimLPA` 系统特权挂载（`FLAG_SYSTEM`）已生效后，自动同步 `/data/app` 系统更新层（`SYSTEM | UPDATED_SYSTEM_APP`）：既 100% 保留特权权限，又让 APK 实体文件常驻 `/data/app`，无需手动为相册等应用逐一关闭「卸载模块」即可丝滑扫码选图写卡；关闭模块时通过 `pm uninstall-system-updates` 自动无损剥离。
-3. **7 项模块化独立功能开关（含 4 项免 Root 实时热切换）**：
+4. **7 项模块化独立功能开关（含 4 项免 Root 实时热切换）**：
    - 日常切换系统 eSIM、开关第三方运营商一键写卡桥接、释放或接管 `LPA://` 激活码链接（方便与 EasyLPAC 等工具共存）、开关系统设置提示文案修正均通过电话框架安全 IPC 实时生效，**日常打开应用与切换核心功能零 Root 弹窗打扰**。
-4. **Android 17 预编译框架资源文案修正增强与元模块选型指引**：
+5. **Android 17 预编译框架资源文案修正增强与元模块选型指引**：
    - 同时覆盖 `Resources.getString` 与 `Resources.getText` 钩子，适配 Android 17 `boot-framework.oat` 内联调用；新增针对澎湃 OS 4 原厂多层 `overlayfs` 分区的 **`Hybrid Mount` / `meta-overlayfs`** 元模块选型检测与引导。
 
 ---
@@ -65,7 +67,7 @@
    - 小米澎湃 HyperOS 4 的 `/product` 等系统分区原厂即采用多层 `overlayfs` 结构。实测表明部分环境下 **`Magic Mount-rs` 会出现挂载不完全**（表现为移动网络出现「发现 eSIM 卡」但点击无响应、`lpaPrivMounted=false`）。
    - **KernelSU / SukiSU Ultra 用户请优先安装并启用 `Hybrid Mount` 或 `meta-overlayfs` 元模块**，重启确保 `/data/adb/metamodule` 生效后再启用本模块。
 2. **内核 `umount` 卸载免疫说明**：
-   - 当 `/product/priv-app` 特权挂载生效后，`v0.6.0` 默认自动开启 **「SukiSU / KernelSU 挂载卸载免疫」**（双层驻留），防止相册选二维码时因内核卸载 `/product/priv-app` 引发闪退。
+   - 当 `/product/priv-app` 特权挂载生效后，`v0.6.1` 默认自动开启 **「SukiSU / KernelSU 挂载卸载免疫」**（双层驻留），防止相册选二维码时因内核卸载 `/product/priv-app` 引发闪退。
 3. **Magisk（v20.4+）与 APatch 用户**：自带系统挂载能力，直接刷入即可。
 
 ---
@@ -132,7 +134,7 @@
 work/esim-adapt/
 ├── LICENSE                         # Apache 2.0 开源协议
 ├── README.md                       # 中英双语完整技术文档（中文置顶）
-├── build_module.py                 # KernelSU / SukiSU / Magisk 模块自动化打包脚本 (v0.6.0)
+├── build_module.py                 # KernelSU / SukiSU / Magisk 模块自动化打包脚本 (v0.6.1)
 ├── finalize_release.py             # 发布产物完整性校验与 SHA256 生成脚本
 ├── prebuilt/
 │   └── MIUIEsimLPA.apk             # 提取自官方 HyperOS 4 固件的未修改原版小米 LPA (v4.1.0.1)
@@ -157,7 +159,7 @@ work/esim-adapt/
 ## 安装与部署指南
 
 1. **（KernelSU / SukiSU 用户）启用挂载元模块**：请先安装并启用 **`Hybrid Mount`** 或 **`meta-overlayfs`** 元模块并重启手机（Magisk / APatch 用户跳过此步）。
-2. **刷入模块 ZIP**：在 Root 管理器中刷入 `XiaomiEsimLPA-HyperOS4-v0.6.0.zip` 并重启（全新安装默认关闭，覆盖升级自动保留原状态）。
+2. **刷入模块 ZIP**：在 Root 管理器中刷入 `XiaomiEsimLPA-HyperOS4-v0.6.1.zip` 并重启（全新安装默认关闭，覆盖升级自动保留原状态）。
 3. **配置 LSPosed 作用域**：在 LSPosed 管理器中启用 **「HYPEROS4实体ESIM桥接」**（`io.github.jabe1122.esimh4probe`），勾选 **`com.android.phone`** 与 **`com.miui.euicc`**。
 4. **开启桥接服务**：将实体 eSIM 卡插入 **卡槽 2**，打开桌面 **「HYPEROS4实体ESIM桥接」** 开启顶部总开关（或在 Root 管理器点击模块「操作 Action」），按提示重启一次即可生效。
 5. **日常写卡与管理**：在应用内直接点击 **「打开小米原生 eSIM 管理与写卡」**，或前往 `系统设置 → 移动网络 → eSIM` 管理套餐、查看 EID、扫码或从相册选二维码写卡。
@@ -200,18 +202,20 @@ python finalize_release.py
 
 # English Documentation
 
-## Overview & What's New in `v0.6.0`
+## Overview & What's New in `v0.6.1`
 
-**HyperOS 4 Removable Physical eSIM Adaptation (`v0.6.0`)** is a clean-room system compatibility and bridging module for Xiaomi and REDMI smartphones running **Xiaomi HyperOS 4 (Android 15 / 16 / 17, SDK 35+)**. It bridges **GSMA SGP.22 removable eUICC cards** in **physical SIM Slot 2** (**ESTKme, Xiaobai, Ctrip/JoyTel, 9eSIM, Xesim, 5ber**, including brand-new zero-profile cards) directly to Xiaomi's unmodified stock LPA (`MIUIEsimLPA.apk` v4.1.0.1).
+**HyperOS 4 Removable Physical eSIM Adaptation (`v0.6.1`)** is a clean-room system compatibility and bridging module for Xiaomi and REDMI smartphones running **Xiaomi HyperOS 4 (Android 15 / 16 / 17, SDK 35+)**. It bridges **GSMA SGP.22 removable eUICC cards** in **physical SIM Slot 2** (**ESTKme, Xiaobai, Ctrip/JoyTel, 9eSIM, Xesim, 5ber**, including brand-new zero-profile cards) directly to Xiaomi's unmodified stock LPA (`MIUIEsimLPA.apk` v4.1.0.1).
 
-### Highlights in `v0.6.0`
-1. **Material Design 3 Expressive UI & Bespoke Adaptive Icon**:
+### Highlights in `v0.6.1` / `v0.6.0`
+1. **Direct Zero-Root Launch of Xiaomi Native eSIM Manager (`v0.6.1`)**:
+   - Fixes `SecurityException` (`MODIFY_PHONE_STATE` denial on `EuiccUiDispatcherActivity` for normal app UIDs) when tapping "Open Xiaomi Native eSIM Manager" in the control center by foreground-launching `ProfileListActivity` directly with a privileged `com.android.phone` dispatcher fallback and a one-tap SIM2 wake dialog when System eSIM is toggled off.
+2. **Material Design 3 Expressive UI & Bespoke Adaptive Icon**:
    - Native Android 14–17 Material You (`Monet`) wallpaper dynamic colors, edge-to-edge system bar insets, dark/light themes, asymmetric `24dp`/`6dp` segmented settings cards, animated `M3Switch` pills with `✓`/`✕` thumb icons, and a custom SIM2-to-eSIM bridge adaptive icon (with `monochrome` themed icon layer).
-2. **Automatic SukiSU / KernelSU `ksu_handle_umount` Immunity**:
-   - Prevents crashes when picking QR code images from Gallery or launching LPA flows from non-root apps whose namespaces unmount `/product/priv-app`. Once privileged `/product/priv-app` mounting (`FLAG_SYSTEM`) is verified, `v0.6.0` automatically syncs a `/data/app` `UPDATED_SYSTEM_APP` layer so APK code paths stay accessible across `ksu_handle_umount`, and strips updates cleanly via `pm uninstall-system-updates` when turned off.
-3. **7 Granular Feature Switches (4 Zero-Root Instant Toggles)**:
+3. **Automatic SukiSU / KernelSU `ksu_handle_umount` Immunity**:
+   - Prevents crashes when picking QR code images from Gallery or launching LPA flows from non-root apps whose namespaces unmount `/product/priv-app`. Once privileged `/product/priv-app` mounting (`FLAG_SYSTEM`) is verified, `v0.6.1` automatically syncs a `/data/app` `UPDATED_SYSTEM_APP` layer so APK code paths stay accessible across `ksu_handle_umount`, and strips updates cleanly via `pm uninstall-system-updates` when turned off.
+4. **7 Granular Feature Switches (4 Zero-Root Instant Toggles)**:
    - Toggle System eSIM (SIM2 power sync), Carrier App One-Click Auth Bridge, `LPA://` URI & Activation Interception, and Settings Text Rewrite instantaneously via caller-verified `ServiceStateProvider` IPC without triggering `su` root toasts on startup or daily use.
-4. **Enhanced Android 17 `Resources.getString` Hook & Metamodule Guidance**:
+5. **Enhanced Android 17 `Resources.getString` Hook & Metamodule Guidance**:
    - Hooks both `Resources.getString` and `Resources.getText` for Android 17 `boot-framework.oat` compatibility, and recommends **`Hybrid Mount`** or **`meta-overlayfs`** over `Magic Mount-rs` on HyperOS 4 multi-layer `overlayfs` partitions.
 
 ---
@@ -261,7 +265,7 @@ python finalize_release.py
 ## Installation & Deployment Guide
 
 1. *(KernelSU / SukiSU only)* Enable **`Hybrid Mount`** or **`meta-overlayfs`** and reboot.
-2. Flash **`XiaomiEsimLPA-HyperOS4-v0.6.0.zip`** in your root manager and reboot.
+2. Flash **`XiaomiEsimLPA-HyperOS4-v0.6.1.zip`** in your root manager and reboot.
 3. Enable **HYPEROS4实体ESIM桥接** (`io.github.jabe1122.esimh4probe`) in **LSPosed** for `com.android.phone` and `com.miui.euicc`.
 4. Insert your removable eUICC card into **SIM Slot 2**, toggle the master switch **ON** in the app (or tap **Action** in your root manager), and reboot once.
 

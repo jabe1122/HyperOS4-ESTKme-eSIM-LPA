@@ -681,6 +681,31 @@ public final class CompatModule extends XposedModule {
                             out.putBoolean("ok", true);
                             return out;
                         }
+                        if ("open_esim_manager".equals(subcmd)) {
+                            if (!active() || ctx == null) {
+                                out.putBoolean("ok", false);
+                                out.putString("error", "module_inactive");
+                                return out;
+                            }
+                            try {
+                                Intent intent = new Intent(
+                                        android.telephony.euicc.EuiccManager.ACTION_MANAGE_EMBEDDED_SUBSCRIPTIONS);
+                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                                if (Build.VERSION.SDK_INT >= 34) {
+                                    android.app.ActivityOptions opts = android.app.ActivityOptions.makeBasic();
+                                    opts.setPendingIntentBackgroundActivityStartMode(
+                                            android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED);
+                                    ctx.startActivity(intent, opts.toBundle());
+                                } else {
+                                    ctx.startActivity(intent);
+                                }
+                                out.putBoolean("ok", true);
+                            } catch (Throwable e) {
+                                out.putBoolean("ok", false);
+                                out.putString("error", e.getClass().getSimpleName());
+                            }
+                            return out;
+                        }
                         out.putBoolean("ok", false);
                         out.putString("error", "unknown_cmd");
                         return out;

@@ -393,13 +393,7 @@ public final class MainActivity extends Activity {
                 R.drawable.ic_qr_code_scanner_24,
                 "打开小米原生 eSIM 管理与写卡",
                 48,
-                () -> {
-                    try {
-                        startActivity(new Intent(EuiccManager.ACTION_MANAGE_EMBEDDED_SUBSCRIPTIONS));
-                    } catch (Throwable e) {
-                        showSnack("请先确认桥接服务与 LPA 系统特权挂载已生效");
-                    }
-                });
+                this::openNativeEsimManager);
         LinearLayout.LayoutParams manageLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         manageLp.topMargin = M3Ui.dp(this, 16);
@@ -640,6 +634,85 @@ public final class MainActivity extends Activity {
 
         parentRow.addView(tile);
         return tvVal;
+    }
+
+    private void openNativeEsimManager() {
+        if (lastReport != null) {
+            if (!lastReport.optBoolean("moduleActive", true)) {
+                showSnack("请先开启上方「实体 eSIM 桥接」总开关");
+                return;
+            }
+            if (!lastReport.optBoolean("lpaPrivMounted", true)) {
+                showSnack("小米 LPA 特权目录尚未挂载生效，请检查元模块并重启");
+                return;
+            }
+            int cardType = lastReport.optInt("cardType", -1);
+            if (cardType == 0) {
+                showSnack("卡槽 2 当前未插入实体 eSIM 卡（普通卡安全隔离保护中）");
+                return;
+            }
+            int esimSwitch = lastReport.optInt("esimSwitch", 1);
+            if (cardType == 1 && esimSwitch == 0) {
+                M3Ui.showM3Dialog(
+                        this,
+                        palette,
+                        "系统 eSIM 开关当前已关闭",
+                        "进入小米原生 eSIM 管理页需要先唤醒激活卡槽 2 中的实体 eSIM 卡。\n\n是否立即开启系统 eSIM 并打开管理页面？",
+                        false,
+                        "开启并打开",
+                        () -> {
+                            setBusy(true);
+                            IO_EXEC.execute(() -> {
+                                Bundle extras = new Bundle();
+                                extras.putBoolean("enabled", true);
+                                Bundle res = ProbeInspector.callPhoneCtrl(MainActivity.this, "set_esim_state", extras);
+                                boolean ok = res != null && res.getBoolean("ok", false);
+                                runOnUiThread(() -> {
+                                    setBusy(false);
+                                    if (ok) {
+                                        refreshDashboard();
+                                        launchMiuiEsimProfileList();
+                                    } else {
+                                        showSnack("唤醒卡槽 2 失败：请确认电话框架 Hook 已激活");
+                                    }
+                                });
+                            });
+                        },
+                        "取消");
+                return;
+            }
+        }
+        launchMiuiEsimProfileList();
+    }
+
+    private void launchMiuiEsimProfileList() {
+        // Primary: direct foreground launch of MIUIEsimLPA's exported ProfileListActivity
+        // (exported=true with no MODIFY_PHONE_STATE / BIND_EUICC_SERVICE permission gate,
+        // avoiding EuiccUiDispatcherActivity's SecurityException for normal app UIDs while
+        // preserving foreground BAL_ALLOW_VISIBLE_WINDOW transition).
+        try {
+            Intent direct = new Intent();
+            direct.setComponent(new ComponentName(
+                    ProbeInspector.LPA_PKG,
+                    "com.miui.euicc.ui.main.ProfileListActivity"));
+            direct.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            startActivity(direct);
+            return;
+        } catch (Throwable primaryErr) {
+            Log.w(TAG, "Direct ProfileListActivity launch failed, trying phone dispatcher", primaryErr);
+        }
+
+        // Fallback: ask privileged com.android.phone (uid 1001, holds MODIFY_PHONE_STATE & BIND_EUICC_SERVICE)
+        // to dispatch ACTION_MANAGE_EMBEDDED_SUBSCRIPTIONS.
+        IO_EXEC.execute(() -> {
+            Bundle res = ProbeInspector.callPhoneCtrl(MainActivity.this, "open_esim_manager", null);
+            boolean ok = res != null && res.getBoolean("ok", false);
+            if (!ok) {
+                String err = res != null ? res.getString("error", "") : "";
+                runOnUiThread(() -> showSnack(
+                        "无法拉起小米 eSIM 管理页" + (err.isEmpty() ? "" : " (" + err + ")")));
+            }
+        });
     }
 
     private void triggerReprobeSim2() {

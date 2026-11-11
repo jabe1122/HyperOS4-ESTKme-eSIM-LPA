@@ -26,8 +26,8 @@ import org.json.JSONObject;
  * app_process CLI invocations remain lightweight and dependency-free).
  */
 public final class ProbeInspector {
-    static final String MODULE_VERSION = "v0.6.0";
-    static final int MODULE_VERSION_CODE = 600;
+    static final String MODULE_VERSION = "v0.6.1";
+    static final int MODULE_VERSION_CODE = 601;
     static final String TESTER_PKG = "io.github.local.esimh4tester";
     static final String LPA_PKG = "com.miui.euicc";
     static final Uri PHONE_CTRL_URI = Uri.parse("content://service-state");

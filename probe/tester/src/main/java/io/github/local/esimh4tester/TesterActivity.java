@@ -46,7 +46,7 @@ import java.util.Locale;
  */
 public final class TesterActivity extends Activity {
     private static final String TAG = "EsimH4Tester";
-    private static final String MODULE_VERSION = "v0.6.0";
+    private static final String MODULE_VERSION = "v0.6.1";
     private static final String LPA_PKG = "com.miui.euicc";
     private static final String KEY_CARD_TYPE = "xiaomi_esim_h4_card_type";
     private static final String KEY_ENABLE_ESIM = "is_enable_esim_for_user";
