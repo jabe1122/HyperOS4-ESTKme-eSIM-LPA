@@ -6,8 +6,8 @@ android {
         applicationId = "io.github.jabe1122.esimh4probe"
         minSdk = 33
         targetSdk = 35
-        versionCode = 500
-        versionName = "0.5.0"
+        versionCode = 600
+        versionName = "0.6.0"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -19,4 +19,6 @@ android {
         disable += "BlockedPrivateApi"
     }
 }
-dependencies { compileOnly("io.github.libxposed:api:101.0.1") }
+dependencies {
+    compileOnly("io.github.libxposed:api:101.0.1")
+}

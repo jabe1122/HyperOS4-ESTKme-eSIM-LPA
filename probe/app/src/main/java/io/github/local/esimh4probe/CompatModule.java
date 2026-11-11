@@ -64,6 +64,8 @@ public final class CompatModule extends XposedModule {
     private static final String TAG = "EsimH4Compat";
     private static final int MIN_SDK = 35;
     private static final String MOCK_DOMAIN = "test.esim.local";
+    static final String CTRL_METHOD = "xiaomi_esim_h4_ctrl";
+    private static final String MODULE_PKG = "io.github.jabe1122.esimh4probe";
 
     private static final ThreadLocal<Boolean> IN_GET_CARDS = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<Boolean> IN_DIRECT_RIL = ThreadLocal.withInitial(() -> Boolean.FALSE);
@@ -104,6 +106,81 @@ public final class CompatModule extends XposedModule {
             }
         }
         return currentApp();
+    }
+
+    private static boolean isAuthorizedAppOrSystem(Context ctx, int callingUid) {
+        if (callingUid == 0 || callingUid == 1000 || callingUid == 1001) {
+            return true;
+        }
+        if (ctx == null) return false;
+        long token = Binder.clearCallingIdentity();
+        try {
+            String[] pkgs = ctx.getPackageManager().getPackagesForUid(callingUid);
+            if (pkgs != null) {
+                for (String pkg : pkgs) {
+                    if (MODULE_PKG.equals(pkg)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+        return false;
+    }
+
+    private static Method findDeclaredMethodUpwards(Class<?> startClass, String name, Class<?>... params) {
+        Class<?> curr = startClass;
+        while (curr != null && curr != Object.class) {
+            try {
+                Method m = curr.getDeclaredMethod(name, params);
+                m.setAccessible(true);
+                return m;
+            } catch (NoSuchMethodException ignored) {
+                curr = curr.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    private static int applySim2EsimSwitch(Context ctx, boolean enableSim2) {
+        if (ctx == null) return -1;
+        long token = Binder.clearCallingIdentity();
+        try {
+            if (!CardTypeGuard.isEuiccForSwitch(ctx)) {
+                if (!enableSim2) {
+                    Settings.Secure.putInt(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, 0);
+                    return 0;
+                }
+                Log.w(TAG, "eSIM switch rejected: no verified eUICC in SIM2; ordinary SIM left unchanged");
+                return -1;
+            }
+            SubscriptionInfo subInfo = Sim2Subscription.resolveOrNull(ctx);
+            String prevSetting = Settings.Secure.getString(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM);
+            if (!Settings.Secure.putInt(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, enableSim2 ? 1 : 0)) {
+                return -1;
+            }
+            if (subInfo != null) {
+                try {
+                    Sim2Subscription.set(ctx, subInfo, enableSim2);
+                } catch (Throwable t) {
+                    Settings.Secure.putString(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, prevSetting);
+                    Log.e(TAG, "SIM2 switch failed; logical state restored", t);
+                    return -1;
+                }
+                Log.i(TAG, "eSIM switch=" + enableSim2 + "; SIM2 UICC applications=" + enableSim2);
+            } else {
+                Log.i(TAG, "eSIM switch=" + enableSim2 + "; verified SIM2 eUICC has no active profile yet (logical state updated)");
+            }
+            ctx.getContentResolver().notifyChange(Settings.Secure.getUriFor(CardTypeGuard.KEY_ENABLE_ESIM), null);
+            return 0;
+        } catch (Throwable t) {
+            Log.e(TAG, "eSIM/SIM2 switch rejected", t);
+            return -1;
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
     }
 
     private static String stripSpaces(String s) {
@@ -266,15 +343,43 @@ public final class CompatModule extends XposedModule {
 
         hook(Resources.class.getDeclaredMethod("getText", int.class)).intercept(chain -> {
             Object original = chain.proceed();
-            if (!active() || !(original instanceof CharSequence)) return original;
+            if (!active() || !CardTypeGuard.isRewriteTextEnabled() || !(original instanceof CharSequence)) {
+                return original;
+            }
             return rewriteSim2EsimText((CharSequence) original);
         });
 
         try {
             hook(Resources.class.getDeclaredMethod("getText", int.class, CharSequence.class)).intercept(chain -> {
                 Object original = chain.proceed();
-                if (!active() || !(original instanceof CharSequence)) return original;
+                if (!active() || !CardTypeGuard.isRewriteTextEnabled() || !(original instanceof CharSequence)) {
+                    return original;
+                }
                 return rewriteSim2EsimText((CharSequence) original);
+            });
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            hook(Resources.class.getDeclaredMethod("getString", int.class)).intercept(chain -> {
+                Object original = chain.proceed();
+                if (!active() || !CardTypeGuard.isRewriteTextEnabled() || !(original instanceof CharSequence)) {
+                    return original;
+                }
+                CharSequence rewritten = rewriteSim2EsimText((CharSequence) original);
+                return rewritten != null ? rewritten.toString() : null;
+            });
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            hook(Resources.class.getDeclaredMethod("getString", int.class, Object[].class)).intercept(chain -> {
+                Object original = chain.proceed();
+                if (!active() || !CardTypeGuard.isRewriteTextEnabled() || !(original instanceof CharSequence)) {
+                    return original;
+                }
+                CharSequence rewritten = rewriteSim2EsimText((CharSequence) original);
+                return rewritten != null ? rewritten.toString() : null;
             });
         } catch (Throwable ignored) {
         }
@@ -336,42 +441,7 @@ public final class CompatModule extends XposedModule {
                         int state = (int) chain.getArg(0);
                         if (state != 0 && state != 1) return chain.proceed();
                         Context ctx = resolvePhoneContext(phoneCtxField);
-                        if (ctx == null) return -1;
-                        long token = Binder.clearCallingIdentity();
-                        try {
-                            if (!CardTypeGuard.isEuiccForSwitch(ctx)) {
-                                if (state == 1) {
-                                    Settings.Secure.putInt(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, 0);
-                                    return 0;
-                                }
-                                Log.w(TAG, "eSIM switch rejected: no verified eUICC in SIM2; ordinary SIM left unchanged");
-                                return -1;
-                            }
-                            SubscriptionInfo subInfo = Sim2Subscription.resolveOrNull(ctx);
-                            String prevSetting = Settings.Secure.getString(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM);
-                            boolean enableSim2 = (state == 0);
-                            if (!Settings.Secure.putInt(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, enableSim2 ? 1 : 0)) {
-                                return -1;
-                            }
-                            if (subInfo != null) {
-                                try {
-                                    Sim2Subscription.set(ctx, subInfo, enableSim2);
-                                } catch (Throwable t) {
-                                    Settings.Secure.putString(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, prevSetting);
-                                    Log.e(TAG, "SIM2 switch failed; logical state restored", t);
-                                    return -1;
-                                }
-                                Log.i(TAG, "eSIM switch=" + enableSim2 + "; SIM2 UICC applications=" + enableSim2);
-                            } else {
-                                Log.i(TAG, "eSIM switch=" + enableSim2 + "; verified SIM2 eUICC has no active profile yet (logical state updated)");
-                            }
-                            return 0;
-                        } catch (Throwable t) {
-                            Log.e(TAG, "eSIM/SIM2 switch rejected", t);
-                            return -1;
-                        } finally {
-                            Binder.restoreCallingIdentity(token);
-                        }
+                        return applySim2EsimSwitch(ctx, state == 0);
                     });
                 } else if ("getEsimGPIOState".equals(mName) && method.getParameterCount() == 0) {
                     hook(method).intercept(chain -> {
@@ -441,7 +511,7 @@ public final class CompatModule extends XposedModule {
             resolveUi.setAccessible(true);
             hook(resolveUi).intercept(chain -> {
                 Object orig = chain.proceed();
-                if (!active() || orig != null) return orig;
+                if (!active() || !CardTypeGuard.isCarrierBridgeEnabled() || orig != null) return orig;
                 long token = Binder.clearCallingIdentity();
                 try {
                     Context ctx = resolvePhoneContext(phoneCtxField);
@@ -512,7 +582,7 @@ public final class CompatModule extends XposedModule {
         Method checkMeta = euiccCtrl.getDeclaredMethod("checkCarrierPrivilegeInMetadata", DownloadableSubscription.class, String.class);
         hook(checkMeta).intercept(chain -> {
             Object orig = chain.proceed();
-            if (!active() || Boolean.TRUE.equals(orig)) return orig;
+            if (!active() || !CardTypeGuard.isCarrierBridgeEnabled() || Boolean.TRUE.equals(orig)) return orig;
             long token = Binder.clearCallingIdentity();
             try {
                 Context ctx = resolvePhoneContext(phoneCtxField);
@@ -522,6 +592,110 @@ public final class CompatModule extends XposedModule {
             }
             return orig;
         });
+
+        try {
+            Class<?> sspClass = loader.loadClass("com.android.phone.ServiceStateProvider");
+            Method sspCall = findDeclaredMethodUpwards(sspClass, "call", String.class, String.class, Bundle.class);
+            if (sspCall != null) {
+                hook(sspCall).intercept(chain -> {
+                    if (!CTRL_METHOD.equals(chain.getArg(0))) {
+                        return chain.proceed();
+                    }
+                    Bundle out = new Bundle();
+                    int callingUid = Binder.getCallingUid();
+                    Context providerCtx = ((ContentProvider) chain.getThisObject()).getContext();
+                    Context ctx = providerCtx != null ? providerCtx : resolvePhoneContext(phoneCtxField);
+                    if (!isAuthorizedAppOrSystem(ctx, callingUid)) {
+                        out.putBoolean("ok", false);
+                        out.putString("error", "denied");
+                        return out;
+                    }
+                    String subcmd = (String) chain.getArg(1);
+                    Bundle extras = (Bundle) chain.getArg(2);
+                    long token = Binder.clearCallingIdentity();
+                    try {
+                        if ("status".equals(subcmd) || subcmd == null) {
+                            CardTypeGuard.refreshPrefs(ctx);
+                            out.putBoolean("ok", true);
+                            out.putBoolean("phone_hook", true);
+                            out.putBoolean("module_active", active());
+                            if (ctx != null) {
+                                out.putInt("card_type", Settings.Secure.getInt(
+                                        ctx.getContentResolver(), CardTypeGuard.KEY_CARD_TYPE, -1));
+                                out.putInt("esim_switch", Settings.Secure.getInt(
+                                        ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, -1));
+                                out.putBoolean("lpa_uri_bridge", Settings.Secure.getInt(
+                                        ctx.getContentResolver(), CardTypeGuard.KEY_LPA_URI_BRIDGE, 1) != 0);
+                                try {
+                                    android.telephony.SubscriptionManager sm =
+                                            ctx.getSystemService(android.telephony.SubscriptionManager.class);
+                                    if (sm != null) {
+                                        android.telephony.SubscriptionInfo sub =
+                                                sm.getActiveSubscriptionInfoForSimSlotIndex(1);
+                                        out.putBoolean("sim2_has_active_sub", sub != null);
+                                        if (sub != null && sub.getDisplayName() != null) {
+                                            String name = sub.getDisplayName().toString().trim();
+                                            if (!name.isEmpty()) {
+                                                out.putString("sim2_carrier_name", name);
+                                            }
+                                        }
+                                    }
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                            out.putBoolean("carrier_bridge", CardTypeGuard.isCarrierBridgeEnabled());
+                            out.putBoolean("rewrite_text", CardTypeGuard.isRewriteTextEnabled());
+                            return out;
+                        }
+                        if ("set_esim_state".equals(subcmd)) {
+                            if (!active()) {
+                                out.putBoolean("ok", false);
+                                out.putString("error", "module_inactive");
+                                return out;
+                            }
+                            boolean enable = extras != null && extras.getBoolean("enabled", false);
+                            int rc = applySim2EsimSwitch(ctx, enable);
+                            out.putBoolean("ok", rc == 0);
+                            if (ctx != null) {
+                                out.putInt("esim_switch", Settings.Secure.getInt(
+                                        ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, -1));
+                            }
+                            return out;
+                        }
+                        if ("set_pref".equals(subcmd)) {
+                            String key = extras != null ? extras.getString("key") : null;
+                            boolean enable = extras == null || extras.getBoolean("enabled", true);
+                            if (CardTypeGuard.KEY_CARRIER_BRIDGE.equals(key)
+                                    || CardTypeGuard.KEY_LPA_URI_BRIDGE.equals(key)
+                                    || CardTypeGuard.KEY_REWRITE_TEXT.equals(key)) {
+                                boolean saved = CardTypeGuard.setFeaturePref(ctx, key, enable);
+                                out.putBoolean("ok", saved);
+                            } else {
+                                out.putBoolean("ok", false);
+                                out.putString("error", "invalid_key");
+                            }
+                            return out;
+                        }
+                        if ("reprobe".equals(subcmd)) {
+                            CardTypeGuard.reprobeNow(ctx);
+                            out.putBoolean("ok", true);
+                            return out;
+                        }
+                        out.putBoolean("ok", false);
+                        out.putString("error", "unknown_cmd");
+                        return out;
+                    } catch (Throwable t) {
+                        out.putBoolean("ok", false);
+                        out.putString("error", t.getClass().getSimpleName());
+                        return out;
+                    } finally {
+                        Binder.restoreCallingIdentity(token);
+                    }
+                });
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "ServiceStateProvider control hook skipped: " + t.getClass().getSimpleName());
+        }
 
         Method sendRes = euiccCtrl.getDeclaredMethod("sendResult", PendingIntent.class, int.class, Intent.class);
         sendRes.setAccessible(true);
@@ -563,6 +737,12 @@ public final class CompatModule extends XposedModule {
             }
             Bundle result = new Bundle();
             int uid = Binder.getCallingUid();
+            Context providerCtx = ((ContentProvider) chain.getThisObject()).getContext();
+            if ("ping".equals(chain.getArg(1)) && isAuthorizedAppOrSystem(providerCtx, uid)) {
+                result.putString("status", active() ? "ok" : "disabled");
+                result.putBoolean("lpa_hook", true);
+                return result;
+            }
             if (uid != 0 && uid != 1001) {
                 result.putString("status", "denied");
                 return result;

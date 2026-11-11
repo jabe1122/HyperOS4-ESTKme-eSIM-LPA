@@ -1,5 +1,5 @@
 minApiVersion=101
 targetApiVersion=101
 staticScope=true
-moduleVersion=v0.5.0
-moduleVersionCode=500
+moduleVersion=v0.6.0
+moduleVersionCode=600

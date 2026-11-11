@@ -4,14 +4,19 @@
     <queries>
         <intent><action android:name="android.service.euicc.EuiccService"/></intent>
         <intent><action android:name="android.telephony.euicc.action.MANAGE_EMBEDDED_SUBSCRIPTIONS"/></intent>
+        <package android:name="com.android.phone"/>
         <package android:name="com.miui.euicc"/>
         <package android:name="io.github.local.esimh4tester"/>
+        <provider android:authorities="service-state;com.miui.euicc.provider"/>
     </queries>
     <application
-        android:label="HYPEROS4实体ESIM桥接"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:description="@string/xposed_description"
         android:allowBackup="false"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:supportsRtl="true"
+        android:theme="@style/Theme.EsimH4">
         <meta-data
             android:name="xposeddescription"
             android:value="@string/xposed_description"/>

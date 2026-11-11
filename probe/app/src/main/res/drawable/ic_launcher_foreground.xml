@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Soft drop shadow behind SIM card -->
+    <path
+        android:fillColor="#28000000"
+        android:pathData="M34,29 L58,29 L72,43 L72,79 C72,82.3 69.3,85 66,85 L34,85 C30.7,85 28,82.3 28,79 L28,35 C28,31.7 30.7,29 34,29 Z"/>
+
+    <!-- Physical Nano-SIM Card body (chamfered top-right corner) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,26 L58,26 L72,40 L72,76 C72,79.3 69.3,82 66,82 L34,82 C30.7,82 28,79.3 28,76 L28,32 C28,28.7 30.7,26 34,26 Z"/>
+
+    <!-- Gold removable eUICC smartcard chip pad -->
+    <path android:pathData="M39,49 L61,49 C63.2,49 65,50.8 65,53 L65,70 C65,72.2 63.2,74 61,74 L39,74 C36.8,74 35,72.2 35,70 L35,53 C35,50.8 36.8,49 39,49 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="35"
+                android:startY="49"
+                android:endX="65"
+                android:endY="74"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FFFFC837"/>
+                <item android:offset="1.0" android:color="#FFF59E0B"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- ISO-7816 eUICC contact traces -->
+    <path
+        android:fillColor="#6678350F"
+        android:pathData="M44,49h1.8v25h-1.8z M54.2,49h1.8v25h-1.8z M35,56.5h9v1.8h-9z M56,56.5h9v1.8h-9z M35,64.5h9v1.8h-9z M56,64.5h9v1.8h-9z M45.8,54.5h8.4v14h-8.4z"/>
+    <path
+        android:fillColor="#FFFFB703"
+        android:pathData="M47.4,56.2h5.2v10.6h-5.2z"/>
+
+    <!-- Slot 2 / Bridge badge Pill at top-left of SIM -->
+    <path
+        android:fillColor="#0B57D0"
+        android:pathData="M37,33 L49,33 C51.2,33 53,34.8 53,37 C53,39.2 51.2,41 49,41 L37,41 C34.8,41 33,39.2 33,37 C33,34.8 34.8,33 37,33 Z"/>
+    <!-- "e" / Bridge link dot inside pill -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38.5,37m-2.1,0a2.1,2.1 0,1 1,4.2 0a2.1,2.1 0,1 1,-4.2 0 M47.5,37m-2.1,0a2.1,2.1 0,1 1,4.2 0a2.1,2.1 0,1 1,-4.2 0 M39.5,36.1h7v1.8h-7z"/>
+
+    <!-- Wireless eSIM radio wave arcs radiating from top-right of card -->
+    <path
+        android:strokeColor="#72EFDD"
+        android:strokeWidth="3.0"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M67,29 A10,10 0 0,1 77,39"/>
+    <path
+        android:strokeColor="#A8F9FF"
+        android:strokeWidth="3.0"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M67,22 A17,17 0 0,1 84,39"/>
+</vector>

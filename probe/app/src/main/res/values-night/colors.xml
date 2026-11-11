@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="status_ok_bg">#123820</color>
+    <color name="status_ok_fg">#81C995</color>
+    <color name="status_warn_bg">#3B2E08</color>
+    <color name="status_warn_fg">#FDD663</color>
+    <color name="status_err_bg">#421817</color>
+    <color name="status_err_fg">#F28B82</color>
+    <color name="status_off_bg">#282A2C</color>
+    <color name="status_off_fg">#C4C7C5</color>
+</resources>

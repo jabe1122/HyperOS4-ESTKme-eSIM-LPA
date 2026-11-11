@@ -26,6 +26,9 @@ final class CardTypeGuard {
     static final String KEY_VERIFIED_ICCID = "xiaomi_esim_h4_verified_iccid";
     static final String KEY_VERIFIED_EID = "xiaomi_esim_h4_verified_eid";
     static final String KEY_ENABLE_ESIM = "is_enable_esim_for_user";
+    static final String KEY_CARRIER_BRIDGE = "xiaomi_esim_h4_carrier_bridge";
+    static final String KEY_LPA_URI_BRIDGE = "xiaomi_esim_h4_lpa_uri_bridge";
+    static final String KEY_REWRITE_TEXT = "xiaomi_esim_h4_rewrite_text";
     private static final String SLOT1_EMPTY_KEY = "SLOT1_PRESENT_EMPTY";
     private static final long[] RETRY_DELAYS_MS = {1500L, 3000L, 5000L, 8000L};
     private static final int MAX_UNKNOWN_STATE_RETRIES = 4;
@@ -46,8 +49,70 @@ final class CardTypeGuard {
     private static int unknownStateRetries = 0;
     private static boolean unknownStateScheduled = false;
     private static boolean observing = false;
+    private static volatile boolean carrierBridgeEnabled = true;
+    private static volatile boolean rewriteTextEnabled = true;
 
     private CardTypeGuard() {}
+
+    static boolean isCarrierBridgeEnabled() {
+        return carrierBridgeEnabled;
+    }
+
+    static boolean isRewriteTextEnabled() {
+        return rewriteTextEnabled;
+    }
+
+    static void refreshPrefs(Context ctx) {
+        if (ctx == null) return;
+        try {
+            carrierBridgeEnabled = Settings.Secure.getInt(ctx.getContentResolver(), KEY_CARRIER_BRIDGE, 1) != 0;
+        } catch (Throwable ignored) {
+            carrierBridgeEnabled = true;
+        }
+        try {
+            rewriteTextEnabled = Settings.Secure.getInt(ctx.getContentResolver(), KEY_REWRITE_TEXT, 1) != 0;
+        } catch (Throwable ignored) {
+            rewriteTextEnabled = true;
+        }
+    }
+
+    static boolean setFeaturePref(Context ctx, String key, boolean enabled) {
+        if (ctx == null) return false;
+        int val = enabled ? 1 : 0;
+        boolean ok = Settings.Secure.putInt(ctx.getContentResolver(), key, val);
+        if (KEY_CARRIER_BRIDGE.equals(key)) {
+            carrierBridgeEnabled = enabled;
+        } else if (KEY_REWRITE_TEXT.equals(key)) {
+            rewriteTextEnabled = enabled;
+        }
+        return ok;
+    }
+
+    static void reprobeNow(Context ctx) {
+        if (ctx == null || !EuiccCardReader.isModuleActive()) return;
+        Context appCtx = ctx.getApplicationContext() != null ? ctx.getApplicationContext() : ctx;
+        WORKER.execute(() -> {
+            if (!EuiccCardReader.isModuleActive()) return;
+            String key = slot1Key(appCtx);
+            if (key.isEmpty()) {
+                handleEmptySlot1Key(appCtx);
+                return;
+            }
+            synchronized (CardTypeGuard.class) {
+                cachedKey = "";
+                cachedEuicc = false;
+                checkedAt = 0L;
+                retryKey = key;
+                retryAttempt = 0;
+                retryScheduled = false;
+                if (key.equals(inFlightKey)) {
+                    return;
+                }
+                inFlightKey = key;
+            }
+            verifySlot1Card(appCtx, key);
+        });
+    }
 
     static synchronized void start(Context ctx) {
         if (observing || ctx == null) return;
@@ -129,6 +194,21 @@ final class CardTypeGuard {
         try {
             appCtx.getContentResolver().registerContentObserver(
                     Settings.Secure.getUriFor(KEY_CARD_TYPE), false, stateObserver);
+        } catch (Throwable ignored) {
+        }
+
+        refreshPrefs(appCtx);
+        ContentObserver prefObserver = new ContentObserver(null) {
+            @Override
+            public void onChange(boolean selfChange) {
+                refreshPrefs(appCtx);
+            }
+        };
+        try {
+            appCtx.getContentResolver().registerContentObserver(
+                    Settings.Secure.getUriFor(KEY_CARRIER_BRIDGE), false, prefObserver);
+            appCtx.getContentResolver().registerContentObserver(
+                    Settings.Secure.getUriFor(KEY_REWRITE_TEXT), false, prefObserver);
         } catch (Throwable ignored) {
         }
 

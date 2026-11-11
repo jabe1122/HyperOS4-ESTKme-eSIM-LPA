@@ -6,8 +6,8 @@ android {
         applicationId = "io.github.local.esimh4tester"
         minSdk = 33
         targetSdk = 35
-        versionCode = 500
-        versionName = "0.5.0"
+        versionCode = 600
+        versionName = "0.6.0"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
