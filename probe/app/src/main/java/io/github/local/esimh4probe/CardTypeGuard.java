@@ -13,6 +13,7 @@ import android.util.Log;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.ToIntFunction;
 
 /**
  * Monitors physical Slot 2 (SIM2) card state and verifies via ISD-R EID probe whether
@@ -29,9 +30,18 @@ final class CardTypeGuard {
     static final String KEY_CARRIER_BRIDGE = "xiaomi_esim_h4_carrier_bridge";
     static final String KEY_LPA_URI_BRIDGE = "xiaomi_esim_h4_lpa_uri_bridge";
     static final String KEY_REWRITE_TEXT = "xiaomi_esim_h4_rewrite_text";
+    /** 1 when the eSIM switch was turned off automatically because SIM2 was removed while bridged. */
+    static final String KEY_ESIM_SUSPENDED = "xiaomi_esim_h4_esim_suspended";
     private static final String SLOT1_EMPTY_KEY = "SLOT1_PRESENT_EMPTY";
     private static final long[] RETRY_DELAYS_MS = {1500L, 3000L, 5000L, 8000L};
     private static final int MAX_UNKNOWN_STATE_RETRIES = 4;
+    private static final long[] PHYSICAL_RESTORE_DELAYS_MS = {2000L, 8000L, 30000L};
+
+    private static volatile ToIntFunction<String> physicalRestorer;
+    // One restore sequence per removal episode; reset when a card is seen in SIM2 again.
+    private static boolean physicalRestoreDone = false;
+    private static boolean physicalRestoreScheduled = false;
+    private static int physicalRestoreAttempt = 0;
 
     private static final ScheduledExecutorService WORKER = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "EsimH4-CardGuard");
@@ -53,6 +63,83 @@ final class CardTypeGuard {
     private static volatile boolean rewriteTextEnabled = true;
 
     private CardTypeGuard() {}
+
+    static void setPhysicalRestorer(ToIntFunction<String> restorer) {
+        physicalRestorer = restorer;
+    }
+
+    /**
+     * Fail-safe for SIM2 removed while the bridge is active: turn the eSIM switch off (remembering
+     * that it was on) so Xiaomi's native logic does not replace SIM2 with the soldered eSIM, then
+     * ask the native manager once to select the physical card on both slots.
+     */
+    private static void onSim2Removed(Context ctx) {
+        int enabled;
+        int suspended;
+        try {
+            enabled = Settings.Secure.getInt(ctx.getContentResolver(), KEY_ENABLE_ESIM, 0);
+            suspended = Settings.Secure.getInt(ctx.getContentResolver(), KEY_ESIM_SUSPENDED, 0);
+        } catch (Throwable ignored) {
+            return;
+        }
+        if (enabled == 1) {
+            Settings.Secure.putInt(ctx.getContentResolver(), KEY_ESIM_SUSPENDED, 1);
+            Settings.Secure.putInt(ctx.getContentResolver(), KEY_ENABLE_ESIM, 0);
+            ctx.getContentResolver().notifyChange(Settings.Secure.getUriFor(KEY_ENABLE_ESIM), null);
+            Log.i(TAG, "SIM2 removed while bridged; eSIM switch suspended until a verified eUICC returns");
+        } else if (suspended != 1) {
+            return;
+        }
+        schedulePhysicalRestore(ctx);
+    }
+
+    private static void schedulePhysicalRestore(Context ctx) {
+        long delay;
+        synchronized (CardTypeGuard.class) {
+            if (physicalRestoreDone || physicalRestoreScheduled
+                    || physicalRestoreAttempt >= PHYSICAL_RESTORE_DELAYS_MS.length) {
+                return;
+            }
+            delay = PHYSICAL_RESTORE_DELAYS_MS[physicalRestoreAttempt++];
+            physicalRestoreScheduled = true;
+        }
+        WORKER.schedule(() -> {
+            synchronized (CardTypeGuard.class) {
+                physicalRestoreScheduled = false;
+                if (physicalRestoreDone) return;
+            }
+            // Only while SIM2 is still empty: never touch the modem selection under a present card.
+            if (!EuiccCardReader.isModuleActive() || !slot1Key(ctx).isEmpty()) return;
+            ToIntFunction<String> restorer = physicalRestorer;
+            int rc = restorer != null ? restorer.applyAsInt("sim2_removed") : -1;
+            if (rc == 0) {
+                synchronized (CardTypeGuard.class) {
+                    physicalRestoreDone = true;
+                }
+            } else {
+                schedulePhysicalRestore(ctx);
+            }
+        }, delay, TimeUnit.MILLISECONDS);
+    }
+
+    private static void onSim2Present() {
+        synchronized (CardTypeGuard.class) {
+            physicalRestoreDone = false;
+            physicalRestoreAttempt = 0;
+        }
+    }
+
+    private static void resumeSuspendedEsim(Context ctx, boolean verifiedEuicc) {
+        try {
+            if (Settings.Secure.getInt(ctx.getContentResolver(), KEY_ESIM_SUSPENDED, 0) != 1) return;
+            if (verifiedEuicc) {
+                Settings.Secure.putInt(ctx.getContentResolver(), KEY_ENABLE_ESIM, 1);
+                Log.i(TAG, "verified eUICC back in SIM2; suspended eSIM switch resumed");
+            }
+            Settings.Secure.putInt(ctx.getContentResolver(), KEY_ESIM_SUSPENDED, 0);
+        } catch (Throwable ignored) {
+        }
+    }
 
     static boolean isCarrierBridgeEnabled() {
         return carrierBridgeEnabled;
@@ -256,6 +343,7 @@ final class CardTypeGuard {
         }
         if (markAbsent) {
             Settings.Secure.putInt(appCtx.getContentResolver(), KEY_CARD_TYPE, 0);
+            onSim2Removed(appCtx);
             return;
         }
         Settings.Secure.putInt(appCtx.getContentResolver(), KEY_CARD_TYPE, -1);
@@ -474,6 +562,10 @@ final class CardTypeGuard {
             }
         }
 
+        onSim2Present();
+        if (isEuiccResult || confirmedNormal) {
+            resumeSuspendedEsim(ctx, isEuiccResult);
+        }
         if (confirmedNormal) {
             Settings.Secure.putInt(ctx.getContentResolver(), KEY_ENABLE_ESIM, 0);
         }

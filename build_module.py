@@ -348,6 +348,42 @@ sync_tester_off() {
   rm -f "$STATE/tester.sha256"
 }
 
+sim2_slot_state() {
+  getprop gsm.sim.state | cut -d , -f 2
+}
+
+# Fail-safe: SIM2 was removed (or the bridge stopped) while the eSIM switch was on. Remember the
+# switch, turn it off so Xiaomi's native logic does not replace SIM2 with the soldered eSIM.
+suspend_esim_switch() {
+  if [ "$(settings --user 0 get secure is_enable_esim_for_user 2>/dev/null)" = 1 ]; then
+    settings --user 0 put secure xiaomi_esim_h4_esim_suspended 1
+    settings --user 0 put secure is_enable_esim_for_user 0
+  fi
+}
+
+# Fail-safe: if SIM2 reads ABSENT while the bridge had the eSIM switch on, ask the native Xiaomi
+# eSIM manager (through the phone-process hook) to select the physical card on both slots, so the
+# modem is not left on the soldered eSIM (SIM2 ABSENT / NO_ATR after reinserting the card).
+restore_physical_sim() {
+  case "$(sim2_slot_state)" in
+    ABSENT|UNKNOWN) ;;
+    *) return 0 ;;
+  esac
+  if [ "$(settings --user 0 get secure is_enable_esim_for_user 2>/dev/null)" != 1 ] \
+     && [ "$(settings --user 0 get secure xiaomi_esim_h4_esim_suspended 2>/dev/null)" != 1 ]; then
+    return 0
+  fi
+  out=$(content call --uri content://service-state --method xiaomi_esim_h4_ctrl --arg restore_physical 2>/dev/null)
+  case "$out" in
+    *ok=true*)
+      logmsg "SIM2 empty while bridged: native physical SIM selection restored."
+      return 0
+      ;;
+  esac
+  logmsg "SIM2 empty while bridged: native physical SIM restore unavailable."
+  return 1
+}
+
 apply_mode_on() {
   sync_lpa_umount_guard
   sync_tester_on
@@ -356,8 +392,18 @@ apply_mode_on() {
     0|1) ;;
     *) requested=1; settings --user 0 put secure is_enable_esim_for_user 1 ;;
   esac
+  suspended=$(settings --user 0 get secure xiaomi_esim_h4_esim_suspended 2>/dev/null)
+  [ "$suspended" = 1 ] && requested=1
   if [ "$requested" = 1 ]; then desired=true; else desired=false; fi
   current=$(sim2_get)
+  case "$current" in
+    true|false|empty|none|null)
+      if [ "$suspended" = 1 ]; then
+        settings --user 0 put secure is_enable_esim_for_user 1
+        settings --user 0 put secure xiaomi_esim_h4_esim_suspended 0
+      fi
+      ;;
+  esac
   case "$current" in
     true|false)
       settings --user 0 put secure xiaomi_esim_h4_card_type 1 >/dev/null
@@ -373,12 +419,17 @@ apply_mode_on() {
       logmsg "Verified empty or inactive eUICC in SIM2; logical eSIM switch ready."
       ;;
     *)
+      if [ "$(sim2_slot_state)" = ABSENT ]; then
+        suspend_esim_switch
+        restore_physical_sim
+      fi
       logmsg "No verified eUICC in SIM2; SIM2 activation left unchanged."
       ;;
   esac
 }
 
 restore_settings() {
+  restore_physical_sim
   strip_lpa_updates
   cleanup_unprivileged_lpa
   sync_tester_off
@@ -398,7 +449,7 @@ restore_settings() {
     settings put global euicc_provisioned "$value"
   fi
   restore_sim2
-  for key in xiaomi_esim_h4_sim2_sub_id xiaomi_esim_h4_verified_iccid xiaomi_esim_h4_verified_eid xiaomi_esim_h4_card_type xiaomi_esim_h4_carrier_bridge xiaomi_esim_h4_lpa_uri_bridge xiaomi_esim_h4_rewrite_text; do
+  for key in xiaomi_esim_h4_sim2_sub_id xiaomi_esim_h4_verified_iccid xiaomi_esim_h4_verified_eid xiaomi_esim_h4_card_type xiaomi_esim_h4_carrier_bridge xiaomi_esim_h4_lpa_uri_bridge xiaomi_esim_h4_rewrite_text xiaomi_esim_h4_esim_suspended; do
     settings --user 0 delete secure "$key" >/dev/null
   done
 }
@@ -466,6 +517,10 @@ ui_print "- 原始设置已备份，不修改卡内任何现有 eSIM 配置。 /
 put('post-fs-data.sh', r'''#!/system/bin/sh
 MODDIR=${0%/*}
 . "$MODDIR/common.sh"
+ISDR_SE=auto
+[ -f "$STATE/isdr_se" ] && . "$STATE/isdr_se"
+case "$ISDR_SE" in se0|se1) ;; *) ISDR_SE=auto ;; esac
+setprop sys.xiaomi_esim_h4.isdr_se "$ISDR_SE"
 read_mode
 if [ "$MODE" = on ]; then
   rm -f "$MODDIR/skip_mount"
@@ -503,6 +558,8 @@ if [ "$MODE" = on ] && [ "$(getprop sys.xiaomi_esim_h4.active)" = 1 ]; then
   else
     setprop sys.xiaomi_esim_h4.active 0
     sync_tester_on
+    suspend_esim_switch
+    restore_physical_sim
     logmsg "ERROR: MODE=on but LPA system overlay is NOT mounted (mount_ok=0). Install/enable Hybrid Mount or meta-overlayfs and reboot."
   fi
 else
@@ -573,6 +630,17 @@ case "$1" in
       echo UMOUNT_GUARD=on > "$STATE/umount_guard"
     fi
     sync_lpa_umount_guard
+    echo "RESULT=OK"
+    ;;
+  isdr_se)
+    case "$2" in
+      se0|se1) sel=$2 ;;
+      *) sel=auto ;;
+    esac
+    echo "ISDR_SE=$sel" > "$STATE/isdr_se"
+    setprop sys.xiaomi_esim_h4.isdr_se "$sel"
+    am force-stop com.miui.euicc >/dev/null 2>&1
+    logmsg "ISD-R selection set to $sel (reboot to refresh EID in Settings)."
     echo "RESULT=OK"
     ;;
   tester)
@@ -649,7 +717,7 @@ if [ ! -d "$MODDIR" ] || [ -f "$MODDIR/disable" ] || [ -f "$MODDIR/remove" ]; th
       true|false) [ -n "$card_key" ] && CLASSPATH="$STATE/restore-helper.apk" app_process /system/bin io.github.local.esimh4probe.Sim2Control set "$value" "$card_key" >/dev/null 2>&1 ;;
     esac
   fi
-  for key in xiaomi_esim_h4_sim2_sub_id xiaomi_esim_h4_verified_iccid xiaomi_esim_h4_verified_eid xiaomi_esim_h4_card_type xiaomi_esim_h4_carrier_bridge xiaomi_esim_h4_lpa_uri_bridge xiaomi_esim_h4_rewrite_text; do
+  for key in xiaomi_esim_h4_sim2_sub_id xiaomi_esim_h4_verified_iccid xiaomi_esim_h4_verified_eid xiaomi_esim_h4_card_type xiaomi_esim_h4_carrier_bridge xiaomi_esim_h4_lpa_uri_bridge xiaomi_esim_h4_rewrite_text xiaomi_esim_h4_esim_suspended; do
     settings --user 0 delete secure "$key" >/dev/null
   done
   setprop sys.xiaomi_esim_h4.active 0
@@ -673,6 +741,7 @@ echo "mount_ok=$(getprop sys.xiaomi_esim_h4.mount_ok)"
 echo "property=$(getprop ro.vendor.miui.support_esim)"
 echo "secure=$(settings --user 0 get secure is_enable_esim_for_user)"
 echo "card_type=$(settings --user 0 get secure xiaomi_esim_h4_card_type)"
+echo "esim_suspended=$(settings --user 0 get secure xiaomi_esim_h4_esim_suspended)"
 echo "lpa_overlay_apk=$([ -f /product/priv-app/MIUIEsimLPA/MIUIEsimLPA.apk ] && echo true || echo false)"
 echo "lpa_priv_xml=$([ -f /product/etc/permissions/privapp-permissions-euicc.xml ] && echo true || echo false)"
 echo "lpa_system_pkg=$(is_lpa_system_pkg && echo true || echo false)"

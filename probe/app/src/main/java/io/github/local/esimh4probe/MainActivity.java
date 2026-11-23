@@ -94,6 +94,7 @@ public final class MainActivity extends Activity {
     private M3Ui.SwitchRow rowRewriteText;
     private M3Ui.SwitchRow rowUmountGuard;
     private M3Ui.SwitchRow rowTesterApp;
+    private M3Ui.SwitchRow rowEstkSe1;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -506,6 +507,15 @@ public final class MainActivity extends Activity {
                 24f, 6f, 2);
         contentCol.addView(rowUmountGuard.card);
 
+        rowEstkSe1 = new M3Ui.SwitchRow(
+                this,
+                palette,
+                R.drawable.ic_sync_alt_24,
+                "eSTK.me 使用 SE1",
+                "关闭时使用 SE0（标准 ISD-R），开启后改为管理 SE1",
+                6f, 6f, 2);
+        contentCol.addView(rowEstkSe1.card);
+
         rowTesterApp = new M3Ui.SwitchRow(
                 this,
                 palette,
@@ -755,6 +765,7 @@ public final class MainActivity extends Activity {
         bindRowClick(rowRewriteText, "请先启用桥接服务并确认电话框架 Hook 已生效");
         bindRowClick(rowUmountGuard, "需 LPA 系统特权挂载生效后方可切换双层驻留保护");
         bindRowClick(rowTesterApp, "请先开启上方主桥接服务开关");
+        bindRowClick(rowEstkSe1, "请先开启上方主桥接服务开关");
 
         switchMasterMode.setOnCheckedChangeListener((btn, isChecked) -> {
             if (bindingUi) return;
@@ -866,6 +877,22 @@ public final class MainActivity extends Activity {
                         showSnack(isChecked
                                 ? "已开启内核 umount 卸载免疫（系统更新层已同步）"
                                 : "已剥离 /data/app 更新层，回退至纯 Overlay 挂载");
+                        refreshDashboard();
+                    });
+        });
+
+        rowEstkSe1.toggle.setOnCheckedChangeListener((btn, isChecked) -> {
+            if (bindingUi) return;
+            rowEstkSe1.refreshIconTint(isChecked);
+            runRootSwitchAction(
+                    rowEstkSe1.toggle,
+                    rowEstkSe1,
+                    isChecked,
+                    new String[]{"isdr_se", isChecked ? "se1" : "auto"},
+                    output -> {
+                        showInfoDialog(
+                                isChecked ? "已切换到 SE1" : "已切换回 SE0",
+                                "新开启的 eSIM 通道会立即使用所选 SE。系统设置里的 EID 和配置列表有缓存，请重启手机后再管理配置。");
                         refreshDashboard();
                     });
         });
@@ -1196,6 +1223,13 @@ public final class MainActivity extends Activity {
                 subUmount = "等待 LPA 特权挂载生效后自动同步系统更新层";
             }
             rowUmountGuard.setRowState(lpaUpdatedSys, moduleActive && lpaPrivMounted, subUmount);
+
+            boolean se1 = "se1".equals(EuiccCardReader.isdrSePref());
+            rowEstkSe1.setRowState(
+                    se1,
+                    moduleActive,
+                    se1 ? "当前管理 SE1 · 关闭后切回 SE0（标准 ISD-R）"
+                        : "当前管理 SE0（标准 ISD-R）· 开启后改为管理 SE1");
 
             rowTesterApp.setRowState(
                     testerInstalled,

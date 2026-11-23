@@ -1,0 +1,243 @@
+name: Nightly Build
+
+# Builds the signed compat and tester APKs and the flashable module, and
+# uploads each of them as a workflow artifact. The run summary lists their
+# SHA-256 checksums.
+#
+# - The scheduled run builds main once a day, and skips when main has no new
+#   commits since the last nightly artifacts were uploaded.
+# - Running the workflow by hand always builds the branch it runs on.
+#
+# Secrets:
+# - SIGNING_KEYSTORE_BASE64: the keystore (.jks), base64-encoded
+# - SIGNING_STORE_PASSWORD, SIGNING_KEY_ALIAS, SIGNING_KEY_PASSWORD
+# - SERVERCHAN_SENDKEY (optional): a ServerChan3 send key (sctp...)
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 每天 3:00（哥本哈根时间）构建一次
+      timezone: "Europe/Copenhagen"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  GRADLE_VERSION: "8.14.3"
+  MODULE_PREFIX: XiaomiEsimLPA-HyperOS4-
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # The summary lists the commits since the previous nightly
+          fetch-depth: 0
+
+      - name: Check for new commits
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The newest module artifact that has not expired marks the previous nightly
+          previous="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --jq '
+            [.artifacts[]
+              | select((.expired | not) and (.name | startswith(env.MODULE_PREFIX)) and (.name | contains("-nightly.")))]
+            | first | .workflow_run.head_sha // ""')"
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ "$previous" = "$GITHUB_SHA" ]; then
+            echo "The last nightly already builds ${GITHUB_SHA:0:7}; skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipped: the last nightly already builds \`${GITHUB_SHA:0:7}\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 21
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        if: steps.check.outputs.skip == 'false'
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Restore signing key
+        if: steps.check.outputs.skip == 'false'
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          # A nightly signed with a random debug key could not update an installed build
+          for name in SIGNING_KEYSTORE_BASE64 SIGNING_STORE_PASSWORD SIGNING_KEY_ALIAS SIGNING_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error title=Signing key missing::Set the $name secret."
+              exit 1
+            fi
+          done
+          keystore="$RUNNER_TEMP/signing.jks"
+          base64 -d <<< "$SIGNING_KEYSTORE_BASE64" > "$keystore"
+          echo "SIGNING_STORE_FILE=$keystore" >> "$GITHUB_ENV"
+
+      - name: Build APKs
+        id: build
+        if: steps.check.outputs.skip == 'false'
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          gradle -p probe --no-daemon clean assembleDebug
+
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)apksigner"
+          for apk in probe/app/build/outputs/apk/debug/app-debug.apk probe/tester/build/outputs/apk/debug/tester-debug.apk; do
+            certs="$("$apksigner" verify --print-certs "$apk")"
+            if grep -q "CN=Android Debug" <<< "$certs"; then
+              echo "::error title=Wrong signing key::$apk is signed with the debug key."
+              exit 1
+            fi
+            cert="$(sed -n 's/.*certificate SHA-256 digest: //p' <<< "$certs" | head -n 1)"
+            echo "$apk: $cert"
+          done
+          echo "cert=$cert" >> "$GITHUB_OUTPUT"
+
+          version="$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' probe/app/build.gradle.kts | head -n 1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=v${version}-nightly.$(TZ=Europe/Copenhagen date +%Y%m%d).${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Package module
+        id: package
+        if: steps.check.outputs.skip == 'false'
+        env:
+          NAME: ${{ steps.build.outputs.name }}
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          out="$RUNNER_TEMP/out"
+          dist="$RUNNER_TEMP/dist"
+          python3 build_module.py --output-dir "$out"
+          mkdir -p "$dist"
+          module="$dist/${MODULE_PREFIX}${NAME}.zip"
+          compat="$dist/Xiaomi-eSIM-Compat-${NAME}.apk"
+          tester="$dist/Xiaomi-eSIM-Tester-${NAME}.apk"
+          cp "$out/${MODULE_PREFIX}v${VERSION}.zip" "$module"
+          cp probe/app/build/outputs/apk/debug/app-debug.apk "$compat"
+          cp probe/tester/build/outputs/apk/debug/tester-debug.apk "$tester"
+          {
+            echo "module=$module"
+            echo "compat=$compat"
+            echo "tester=$tester"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload module
+        id: upload-module
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: ${{ steps.package.outputs.module }}
+          if-no-files-found: error
+
+      - name: Upload compat APK
+        id: upload-compat
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: ${{ steps.package.outputs.compat }}
+          if-no-files-found: error
+
+      - name: Upload tester APK
+        id: upload-tester
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: ${{ steps.package.outputs.tester }}
+          if-no-files-found: error
+
+      - name: Write summary
+        if: steps.check.outputs.skip == 'false'
+        env:
+          NAME: ${{ steps.build.outputs.name }}
+          CERT: ${{ steps.build.outputs.cert }}
+          PREVIOUS: ${{ steps.check.outputs.previous }}
+          MODULE: ${{ steps.package.outputs.module }}
+          COMPAT: ${{ steps.package.outputs.compat }}
+          TESTER: ${{ steps.package.outputs.tester }}
+          MODULE_URL: ${{ steps.upload-module.outputs.artifact-url }}
+          COMPAT_URL: ${{ steps.upload-compat.outputs.artifact-url }}
+          TESTER_URL: ${{ steps.upload-tester.outputs.artifact-url }}
+        run: |
+          row() {
+            printf '| [%s](%s) | %s | `%s` |\n' "$(basename "$1")" "$2" "$(du -h "$1" | cut -f 1)" "$(sha256sum "$1" | cut -d ' ' -f 1)"
+          }
+          {
+            echo "## Nightly $NAME"
+            echo
+            echo "Built from \`${GITHUB_REF_NAME}\` at \`${GITHUB_SHA:0:7}\`. This is an untested development build."
+            echo
+            echo "| File | Size | SHA-256 |"
+            echo "| --- | --- | --- |"
+            row "$MODULE" "$MODULE_URL"
+            row "$COMPAT" "$COMPAT_URL"
+            row "$TESTER" "$TESTER_URL"
+            echo
+            echo "APK signing certificate SHA-256: \`$CERT\`"
+            if [ -n "$PREVIOUS" ] && [ "$PREVIOUS" != "$GITHUB_SHA" ] && git merge-base --is-ancestor "$PREVIOUS" HEAD 2>/dev/null; then
+              echo
+              echo "### Changes since the previous nightly (${PREVIOUS:0:7})"
+              echo
+              git log --no-merges --format='- %s (%h)' -n 50 "$PREVIOUS..HEAD"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send ServerChan push
+        # Push when the nightly was uploaded or the run failed, not when it was skipped
+        if: ${{ !cancelled() && (failure() || steps.upload-tester.outcome == 'success') }}
+        env:
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+          JOB_STATUS: ${{ job.status }}
+          NAME: ${{ steps.build.outputs.name }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload-tester.outcome }}
+        run: |
+          repo="${GITHUB_REPOSITORY#*/}"
+          if [ "$JOB_STATUS" = "success" ]; then
+            export TITLE="eSIM LPA nightly built"
+            export SHORT="$repo: Built $NAME"
+          else
+            export TITLE="eSIM LPA nightly failed"
+            if [ "$BUILD_OUTCOME" = "failure" ]; then
+              export SHORT="$repo: Could not build the APKs"
+            elif [ "$PACKAGE_OUTCOME" = "failure" ]; then
+              export SHORT="$repo: Could not package the module"
+            elif [ "$UPLOAD_OUTCOME" != "success" ]; then
+              export SHORT="$repo: Could not upload the artifacts"
+            else
+              export SHORT="$repo: The nightly workflow failed"
+            fi
+          fi
+          export DESP="- Build: \`${NAME:-unknown}\`
+          - Commit: \`${GITHUB_SHA:0:7}\` on \`$GITHUB_REF_NAME\`
+          - Trigger: \`$GITHUB_EVENT_NAME\`
+          - APKs: \`${BUILD_OUTCOME:-skipped}\`
+          - Module: \`${PACKAGE_OUTCOME:-skipped}\`
+          - Upload: \`${UPLOAD_OUTCOME:-skipped}\`"
+          if [ "$JOB_STATUS" = "success" ]; then
+            DESP+=$'\n\n'"[Download the artifacts](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}#artifacts)"
+          fi
+          .github/scripts/serverchan.sh
