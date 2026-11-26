@@ -1,4 +1,5 @@
 from pathlib import Path
+import argparse
 import hashlib
 import json
 import re
@@ -6,11 +7,23 @@ import shutil
 import xml.etree.ElementTree as ET
 import zipfile
 
+parser = argparse.ArgumentParser(description='Check the built module and copy the release files')
+parser.add_argument('--debug', action='store_true',
+                    help='use the debug APKs; pass it when build_module.py was run with --debug')
+build_type = 'debug' if parser.parse_args().debug else 'release'
+
 base = Path(__file__).resolve().parent
 out = base.parents[1] / 'outputs'
-apk = base / 'probe/app/build/outputs/apk/debug/app-debug.apk'
-tester_apk = base / 'probe/tester/build/outputs/apk/debug/tester-debug.apk'
-module = out / 'XiaomiEsimLPA-HyperOS4-v0.6.1.zip'
+# Gradle splits each APK by ABI; the module ships the arm64-v8a one
+abis = ('universal', 'arm64-v8a', 'armeabi-v7a')
+apk_path = lambda module, abi: base / f'probe/{module}/build/outputs/apk/{build_type}/{module}-{abi}-{build_type}.apk'
+apk = apk_path('app', 'arm64-v8a')
+metadata = json.loads((apk.parent / 'output-metadata.json').read_text())
+arm64 = next(item for item in metadata['elements']
+             if any(f['value'] == 'arm64-v8a' for f in item['filters']))
+version_name = arm64['versionName']
+version_code = int(arm64['versionCode'])
+module = out / f'XiaomiEsimLPA-HyperOS4-v{version_name}.zip'
 original_sha = '9daa20d489168264109d68532d27857a9eef7d7ce72199c565afb6b96d2e6b4f'
 sha = lambda data: hashlib.sha256(data).hexdigest()
 
@@ -26,10 +39,10 @@ with zipfile.ZipFile(module) as z:
     assert 'lpa.apk' not in z.namelist()
     mod_prop = z.read('module.prop')
     assert b'author=Local HyperOS 4 eSIM Adaptation\n' in mod_prop
-    assert b'version=v0.6.1\n' in mod_prop
-    assert b'versionCode=601\n' in mod_prop
+    assert f'version=v{version_name}\n'.encode() in mod_prop
+    assert f'versionCode={version_code}\n'.encode() in mod_prop
     assert z.read('compat.apk') == apk.read_bytes()
-    assert z.read('tester.apk') == tester_apk.read_bytes()
+    assert 'tester.apk' not in z.namelist()
     assert sha(z.read('system/product/priv-app/MIUIEsimLPA/MIUIEsimLPA.apk')) == original_sha
     for name in z.namelist():
         if name.endswith('.xml'):
@@ -64,10 +77,11 @@ if (base / 'final-restored-list.xml').exists():
     )
     assert values('rename-original.xml', 'dialog_input_area') == ['RedteaGO']
 
-release_apk = out / 'Xiaomi-eSIM-Compat-v0.6.1.apk'
-shutil.copy2(apk, release_apk)
-release_tester_apk = out / 'Xiaomi-eSIM-Tester-v0.6.1.apk'
-shutil.copy2(tester_apk, release_tester_apk)
+release_apks = []
+for abi in abis:
+    release_apk = out / f'Xiaomi-eSIM-Compat-v{version_name}-{abi}.apk'
+    shutil.copy2(apk_path('app', abi), release_apk)
+    release_apks.append(release_apk)
 
 readme_out = out / 'README.md'
 shutil.copy2(base / 'README.md', readme_out)
@@ -132,9 +146,11 @@ python build_module.py
 python finalize_release.py
 ```
 '''
+user_guide_text = user_guide_text.replace('版本：0.6.1（`versionCode=601`）',
+                                          f'版本：{version_name}（`versionCode={version_code}`）')
 user_guide_cn.write_text(user_guide_text.replace('\r\n', '\n'), encoding='utf-8', newline='\n')
 
-source = out / 'XiaomiEsimLPA-HyperOS4-source-v0.6.1.zip'
+source = out / f'XiaomiEsimLPA-HyperOS4-source-v{version_name}.zip'
 with zipfile.ZipFile(source, 'w', zipfile.ZIP_DEFLATED) as z:
     z.write(base / 'build_module.py', 'build_module.py')
     z.write(base / 'finalize_release.py', 'finalize_release.py')
@@ -158,8 +174,8 @@ with zipfile.ZipFile(source) as z:
     assert b'0.6.1' in z.read('USER_GUIDE_CN.md')
 
 report = {
-    'version': '0.6.1',
-    'versionCode': 601,
+    'version': version_name,
+    'versionCode': version_code,
     'date': '2026-11-11',
     'device': 'bixi / myron (multi-device HyperOS 4)',
     'build': 'OS4.0.0.11.XOHCNXM / OS4.0.6.0.XPMCNXM',
@@ -213,8 +229,7 @@ report = {
 }
 (out / '验证结果.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 files = [
-    release_apk,
-    release_tester_apk,
+    *release_apks,
     module,
     source,
     readme_out,
@@ -222,6 +237,6 @@ files = [
     out / '验证结果.json',
 ]
 (out / 'SHA256SUMS.txt').write_text(''.join(f'{sha(p.read_bytes())}  {p.name}\n' for p in files), encoding='utf-8')
-print('Release v0.6.1 validation passed; upstream removed; source excludes build caches and signing keys.')
-for p in files[:4]:
+print(f'Release v{version_name} ({version_code}) validation passed; source excludes build caches and signing keys.')
+for p in files[:len(release_apks) + 2]:
     print(p.name, p.stat().st_size)

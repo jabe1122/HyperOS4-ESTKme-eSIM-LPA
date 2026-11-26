@@ -36,8 +36,8 @@ public final class LpaBridgeActivity extends Activity {
             }
             if (!EuiccCardReader.isModuleActive() || cardType != 1) {
                 String msg = (EuiccCardReader.isModuleActive() && cardType == -1)
-                        ? "正在识别卡槽2中的SIM卡类型，请稍候重试"
-                        : "卡槽2未检测到可用eSIM卡或模块未启用";
+                        ? getString(R.string.bridge_toast_detecting)
+                        : getString(R.string.bridge_toast_unavailable);
                 Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
                 setResult(Activity.RESULT_CANCELED);
                 return;
@@ -58,7 +58,8 @@ public final class LpaBridgeActivity extends Activity {
             startActivity(target);
             setResult(Activity.RESULT_OK);
         } catch (Throwable t) {
-            Toast.makeText(this, "无法调起小米 eSIM 写卡页面: " + t.getClass().getSimpleName(), Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, getString(R.string.bridge_toast_launch_failed, t.getClass().getSimpleName()),
+                    Toast.LENGTH_SHORT).show();
             setResult(Activity.RESULT_CANCELED);
         } finally {
             finish();

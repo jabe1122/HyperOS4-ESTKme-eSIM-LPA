@@ -1,17 +1,35 @@
 from pathlib import Path
 import argparse
 import hashlib
+import json
+import os
 import shutil
 import zipfile
 
 BASE = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser(description='Build Xiaomi HyperOS 4 removable eSIM module (v0.6.1)')
 parser.add_argument('--output-dir', type=Path, default=BASE.parents[1] / 'outputs')
-OUT = parser.parse_args().output_dir.resolve()
+parser.add_argument('--debug', action='store_true',
+                    help='package the debug APKs (assembleDebug) instead of the R8 release APKs (assembleRelease)')
+ARGS = parser.parse_args()
+OUT = ARGS.output_dir.resolve()
 MOD = BASE / 'module'
 PREBUILT_LPA = BASE / 'prebuilt/MIUIEsimLPA.apk'
-COMPAT_APK = BASE / 'probe/app/build/outputs/apk/debug/app-debug.apk'
-TESTER_APK = BASE / 'probe/tester/build/outputs/apk/debug/tester-debug.apk'
+BUILD_TYPE = 'debug' if ARGS.debug else 'release'
+COMPAT_APK = BASE / f'probe/app/build/outputs/apk/{BUILD_TYPE}/app-arm64-v8a-{BUILD_TYPE}.apk'
+if not COMPAT_APK.is_file():
+    # The module ships the arm64-v8a APK of the ABI split.
+    # An unsigned release build is named *-release-unsigned.apk: release needs the signing key.
+    parser.error(f'{COMPAT_APK} not found. Run "gradle -p probe assemble{BUILD_TYPE.capitalize()}" first'
+                 + ('' if ARGS.debug else ' with the signing key configured') + '.')
+
+metadata = json.loads((COMPAT_APK.parent / 'output-metadata.json').read_text())
+arm64 = next(item for item in metadata['elements']
+             if any(f['value'] == 'arm64-v8a' for f in item['filters']))
+VERSION_NAME = arm64['versionName']
+VERSION_CODE = int(arm64['versionCode'])
+if os.environ.get('BUILD_VERSION_CODE') and VERSION_CODE != int(os.environ['BUILD_VERSION_CODE']):
+    parser.error('APK version code does not match BUILD_VERSION_CODE')
 
 OUT.mkdir(parents=True, exist_ok=True)
 if MOD.exists():
@@ -22,6 +40,8 @@ MOD.mkdir(parents=True, exist_ok=True)
 def put(rel_path: str, content: str) -> None:
     target = MOD / rel_path
     target.parent.mkdir(parents=True, exist_ok=True)
+    content = content.replace('@VERSION_NAME@', VERSION_NAME)
+    content = content.replace('@VERSION_CODE@', str(VERSION_CODE))
     target.write_text(content.replace('\r\n', '\n'), encoding='utf-8', newline='\n')
 
 
@@ -67,8 +87,8 @@ put('system/product/etc/permissions/privapp-permissions-euicc.xml', '''<?xml ver
 
 put('module.prop', '''id=XiaomiEsimLPAHyperOS4
 name=Xiaomi eSIM LPA - HyperOS 4
-version=v0.6.1
-versionCode=601
+version=v@VERSION_NAME@
+versionCode=@VERSION_CODE@
 author=Local HyperOS 4 eSIM Adaptation
 description=Removable eUICC (ESTKme / Xiaobai / 9eSIM / Xesim) in SIM2 on HyperOS 4. Native eSIM feature, Xiaomi LPA v4.1.0.1, Material 3 control switches, and SukiSU/KernelSU umount immunity.
 ''')
@@ -96,12 +116,6 @@ read_umount_guard() {
   UG=$(cat "$STATE/umount_guard" 2>/dev/null)
   UG=${UG#UMOUNT_GUARD=}
   [ "$UG" = off ] && UMOUNT_GUARD=off || UMOUNT_GUARD=on
-}
-
-read_tester_enabled() {
-  TE=$(cat "$STATE/tester_enabled" 2>/dev/null)
-  TE=${TE#TESTER=}
-  [ "$TE" = off ] && TESTER_ENABLED=off || TESTER_ENABLED=on
 }
 
 valid_value() {
@@ -142,11 +156,11 @@ is_lpa_system_pkg() {
   if pm list packages -s com.miui.euicc 2>/dev/null | grep -qx 'package:com.miui.euicc'; then
     return 0
   fi
-  dumpsys package com.miui.euicc 2>/dev/null | grep -Eq '(pkgFlags|flags)=\[[^]]*(^| )SYSTEM( |$|\])'
+  dumpsys package com.miui.euicc 2>/dev/null | grep -Eq '(pkgFlags|flags)=\[([[:space:]]|[^]]*[[:space:]])?SYSTEM([[:space:]]|\])'
 }
 
 is_lpa_updated_system_pkg() {
-  dumpsys package com.miui.euicc 2>/dev/null | grep -Eq '(pkgFlags|flags)=\[[^]]*(^| )UPDATED_SYSTEM_APP( |$|\])'
+  dumpsys package com.miui.euicc 2>/dev/null | grep -Eq '(pkgFlags|flags)=\[([[:space:]]|[^]]*[[:space:]])?UPDATED_SYSTEM_APP([[:space:]]|\])'
 }
 
 is_lpa_unprivileged_user_pkg() {
@@ -157,7 +171,7 @@ is_lpa_unprivileged_user_pkg() {
   pkg_dump=$(dumpsys package com.miui.euicc 2>/dev/null)
   [ -n "$pkg_dump" ] || return 1
   echo "$pkg_dump" | grep -Eq '(pkgFlags|flags)=\[' || return 1
-  echo "$pkg_dump" | grep -Eq '(pkgFlags|flags)=\[[^]]*(^| )SYSTEM( |$|\])' && return 1
+  echo "$pkg_dump" | grep -Eq '(pkgFlags|flags)=\[([[:space:]]|[^]]*[[:space:]])?SYSTEM([[:space:]]|\])' && return 1
   return 0
 }
 
@@ -179,36 +193,91 @@ strip_lpa_updates() {
 }
 
 sync_lpa_umount_guard() {
-  [ -f "$LPA_OVERLAY_APK" ] && [ -f "$LPA_PRIV_XML" ] && is_lpa_system_pkg || return 0
+  # App-launched root shells may inherit an unmounted namespace. Check the
+  # package manager's filesystem view before rejecting a valid system mount.
+  guard_overlay_apk="$LPA_OVERLAY_APK"
+  guard_priv_xml="$LPA_PRIV_XML"
+  if ! { [ -f "$guard_overlay_apk" ] && [ -f "$guard_priv_xml" ]; }; then
+    system_server_pid=$(pidof system_server 2>/dev/null)
+    case "$system_server_pid" in
+      ''|*[!0-9]*)
+        logmsg "Cannot sync LPA: cannot identify the system_server mount namespace."
+        return 1
+        ;;
+    esac
+    guard_overlay_apk="/proc/$system_server_pid/root$LPA_OVERLAY_APK"
+    guard_priv_xml="/proc/$system_server_pid/root$LPA_PRIV_XML"
+  fi
+  if [ ! -f "$guard_overlay_apk" ]; then
+    logmsg "Cannot sync LPA: privileged APK is not accessible at $guard_overlay_apk."
+    return 1
+  fi
+  if [ ! -f "$guard_priv_xml" ]; then
+    logmsg "Cannot sync LPA: privilege XML is not accessible at $guard_priv_xml."
+    return 1
+  fi
+  if ! is_lpa_system_pkg; then
+    logmsg "Cannot sync LPA: package manager does not report com.miui.euicc as a SYSTEM app."
+    return 1
+  fi
   mkdir -p "$STATE"
   chmod 700 "$STATE"
   read_umount_guard
   if [ "$UMOUNT_GUARD" = off ]; then
     if is_lpa_updated_system_pkg; then
       logmsg "Stripping UPDATED_SYSTEM_APP layer for com.miui.euicc (umount_guard=off)."
-      pm uninstall-system-updates com.miui.euicc >/dev/null 2>&1 || true
+      # Some Android builds print Success but return a nonzero exit status.
+      # Verify package state instead of treating that status as a failure.
+      pm uninstall-system-updates com.miui.euicc 2>&1 || logmsg "Checking package state after nonzero uninstall exit status."
+      if ! is_lpa_system_pkg; then
+        logmsg "Cannot verify the system LPA after removing updates."
+        return 1
+      fi
+      if ! guard_pkg_dump=$(dumpsys package com.miui.euicc 2>&1); then
+        logmsg "Cannot read LPA package flags after removing updates."
+        return 1
+      fi
+      if ! echo "$guard_pkg_dump" | grep -Eq '(pkgFlags|flags)=\['; then
+        logmsg "LPA package flags are missing after removing updates."
+        return 1
+      fi
+      if echo "$guard_pkg_dump" | grep -Eq '(pkgFlags|flags)=\[([[:space:]]|[^]]*[[:space:]])?UPDATED_SYSTEM_APP([[:space:]]|\])'; then
+        logmsg "LPA still has an UPDATED_SYSTEM_APP layer after removal."
+        return 1
+      fi
       rm -f "$STATE/lpa.sha256"
     fi
     return 0
   fi
   src_apk="$MODDIR/system/product/priv-app/MIUIEsimLPA/MIUIEsimLPA.apk"
-  [ -f "$src_apk" ] || src_apk="$LPA_OVERLAY_APK"
-  [ -f "$src_apk" ] || return 0
+  [ -f "$src_apk" ] || src_apk="$guard_overlay_apk"
+  [ -f "$src_apk" ] || { logmsg "LPA source APK is missing."; return 1; }
   apk_sha=$(sha256sum "$src_apk" 2>/dev/null | cut -d ' ' -f 1)
   if is_lpa_updated_system_pkg && [ -n "$apk_sha" ] && [ "$(cat "$STATE/lpa.sha256" 2>/dev/null)" = "$apk_sha" ]; then
     return 0
   fi
   staged="/data/local/tmp/.esim_h4_com.miui.euicc.apk"
   rm -f "$staged"
-  if cp "$src_apk" "$staged" 2>/dev/null; then
-    chmod 0644 "$staged"
-    restorecon "$staged" >/dev/null 2>&1 || true
-    if pm install -r "$staged" >/dev/null 2>&1; then
-      [ -n "$apk_sha" ] && echo "$apk_sha" > "$STATE/lpa.sha256"
-      logmsg "Synced com.miui.euicc UPDATED_SYSTEM_APP layer (SukiSU/KernelSU umount immunity active)."
-    fi
+  if ! cp "$src_apk" "$staged" 2>&1; then
     rm -f "$staged"
+    logmsg "Failed to stage the LPA APK."
+    return 1
   fi
+  chmod 0644 "$staged"
+  restorecon "$staged" >/dev/null 2>&1 || true
+  if ! pm install -r "$staged" 2>&1; then
+    rm -f "$staged"
+    logmsg "Failed to install the LPA update layer."
+    return 1
+  fi
+  rm -f "$staged"
+  if ! is_lpa_updated_system_pkg; then
+    logmsg "LPA installation completed without an UPDATED_SYSTEM_APP layer."
+    return 1
+  fi
+  [ -n "$apk_sha" ] && echo "$apk_sha" > "$STATE/lpa.sha256"
+  logmsg "Synced com.miui.euicc UPDATED_SYSTEM_APP layer (SukiSU/KernelSU umount immunity active)."
+  return 0
 }
 
 check_lpa_mount_ok() {
@@ -318,6 +387,12 @@ cleanup_legacy_probe_pkg() {
     logmsg "Removing legacy v0.4.0 package io.github.local.esimh4probe."
     pm uninstall io.github.local.esimh4probe >/dev/null 2>&1
   fi
+  # Older versions shipped the mock tester as a separate app; it is now the Test tab of the compat app.
+  if pm path io.github.local.esimh4tester >/dev/null 2>&1; then
+    logmsg "Removing legacy tester package io.github.local.esimh4tester."
+    pm uninstall io.github.local.esimh4tester >/dev/null 2>&1
+  fi
+  rm -f "$STATE/tester.sha256" "$STATE/tester_enabled"
 }
 
 refresh_lsposed_index() {
@@ -325,39 +400,76 @@ refresh_lsposed_index() {
   [ -x /data/adb/modules/riru_lsposed/lspctl ] && /data/adb/modules/riru_lsposed/lspctl module show --user=0 io.github.jabe1122.esimh4probe >/dev/null 2>&1 || true
 }
 
-sync_tester_on() {
+sync_lpa_bridge_on() {
   uri_pref=$(settings --user 0 get secure xiaomi_esim_h4_lpa_uri_bridge 2>/dev/null)
   if [ "$uri_pref" = 0 ]; then
     pm disable io.github.jabe1122.esimh4probe/io.github.local.esimh4probe.LpaBridgeActivity >/dev/null 2>&1
   else
     pm enable io.github.jabe1122.esimh4probe/io.github.local.esimh4probe.LpaBridgeActivity >/dev/null 2>&1
   fi
-  read_tester_enabled
-  if [ "$TESTER_ENABLED" = on ]; then
-    sync_apk_if_needed io.github.local.esimh4tester "$MODDIR/tester.apk" "$STATE/tester.sha256"
-  else
-    pm uninstall io.github.local.esimh4tester >/dev/null 2>&1
-    rm -f "$STATE/tester.sha256"
+}
+
+sync_lpa_bridge_off() {
+  pm disable io.github.jabe1122.esimh4probe/io.github.local.esimh4probe.LpaBridgeActivity >/dev/null 2>&1
+  cleanup_legacy_probe_pkg
+}
+
+sim2_slot_state() {
+  getprop gsm.sim.state | cut -d , -f 2
+}
+
+# Fail-safe: SIM2 was removed (or the bridge stopped) while the eSIM switch was on. Remember the
+# switch, turn it off so Xiaomi's native logic does not replace SIM2 with the soldered eSIM.
+suspend_esim_switch() {
+  if [ "$(settings --user 0 get secure is_enable_esim_for_user 2>/dev/null)" = 1 ]; then
+    settings --user 0 put secure xiaomi_esim_h4_esim_suspended 1
+    settings --user 0 put secure is_enable_esim_for_user 0
   fi
 }
 
-sync_tester_off() {
-  pm disable io.github.jabe1122.esimh4probe/io.github.local.esimh4probe.LpaBridgeActivity >/dev/null 2>&1
-  pm uninstall io.github.local.esimh4probe >/dev/null 2>&1
-  pm uninstall io.github.local.esimh4tester >/dev/null 2>&1
-  rm -f "$STATE/tester.sha256"
+# Fail-safe: if SIM2 reads ABSENT while the bridge had the eSIM switch on, ask the native Xiaomi
+# eSIM manager (through the phone-process hook) to select the physical card on both slots, so the
+# modem is not left on the soldered eSIM (SIM2 ABSENT / NO_ATR after reinserting the card).
+restore_physical_sim() {
+  case "$(sim2_slot_state)" in
+    ABSENT|UNKNOWN) ;;
+    *) return 0 ;;
+  esac
+  if [ "$(settings --user 0 get secure is_enable_esim_for_user 2>/dev/null)" != 1 ] \
+     && [ "$(settings --user 0 get secure xiaomi_esim_h4_esim_suspended 2>/dev/null)" != 1 ]; then
+    return 0
+  fi
+  out=$(content call --uri content://service-state --method xiaomi_esim_h4_ctrl --arg restore_physical 2>/dev/null)
+  case "$out" in
+    *ok=true*)
+      logmsg "SIM2 empty while bridged: native physical SIM selection restored."
+      return 0
+      ;;
+  esac
+  logmsg "SIM2 empty while bridged: native physical SIM restore unavailable."
+  return 1
 }
 
 apply_mode_on() {
   sync_lpa_umount_guard
-  sync_tester_on
+  sync_lpa_bridge_on
   requested=$(settings --user 0 get secure is_enable_esim_for_user)
   case "$requested" in
     0|1) ;;
     *) requested=1; settings --user 0 put secure is_enable_esim_for_user 1 ;;
   esac
+  suspended=$(settings --user 0 get secure xiaomi_esim_h4_esim_suspended 2>/dev/null)
+  [ "$suspended" = 1 ] && requested=1
   if [ "$requested" = 1 ]; then desired=true; else desired=false; fi
   current=$(sim2_get)
+  case "$current" in
+    true|false|empty|none|null)
+      if [ "$suspended" = 1 ]; then
+        settings --user 0 put secure is_enable_esim_for_user 1
+        settings --user 0 put secure xiaomi_esim_h4_esim_suspended 0
+      fi
+      ;;
+  esac
   case "$current" in
     true|false)
       settings --user 0 put secure xiaomi_esim_h4_card_type 1 >/dev/null
@@ -373,15 +485,20 @@ apply_mode_on() {
       logmsg "Verified empty or inactive eUICC in SIM2; logical eSIM switch ready."
       ;;
     *)
+      if [ "$(sim2_slot_state)" = ABSENT ]; then
+        suspend_esim_switch
+        restore_physical_sim
+      fi
       logmsg "No verified eUICC in SIM2; SIM2 activation left unchanged."
       ;;
   esac
 }
 
 restore_settings() {
+  restore_physical_sim
   strip_lpa_updates
   cleanup_unprivileged_lpa
-  sync_tester_off
+  sync_lpa_bridge_off
   [ -f "$STATE/originals.saved" ] || return 0
   value=$(cat "$STATE/secure.original")
   valid_value "$value" || return 1
@@ -398,7 +515,7 @@ restore_settings() {
     settings put global euicc_provisioned "$value"
   fi
   restore_sim2
-  for key in xiaomi_esim_h4_sim2_sub_id xiaomi_esim_h4_verified_iccid xiaomi_esim_h4_verified_eid xiaomi_esim_h4_card_type xiaomi_esim_h4_carrier_bridge xiaomi_esim_h4_lpa_uri_bridge xiaomi_esim_h4_rewrite_text; do
+  for key in xiaomi_esim_h4_sim2_sub_id xiaomi_esim_h4_verified_iccid xiaomi_esim_h4_verified_eid xiaomi_esim_h4_card_type xiaomi_esim_h4_carrier_bridge xiaomi_esim_h4_lpa_uri_bridge xiaomi_esim_h4_rewrite_text xiaomi_esim_h4_esim_suspended; do
     settings --user 0 delete secure "$key" >/dev/null
   done
 }
@@ -442,12 +559,17 @@ if pm path io.github.local.esimh4probe >/dev/null 2>&1; then
   ui_print "- 检测到 v0.4.0 旧包名 io.github.local.esimh4probe，正在自动卸载清理... / Removing legacy io.github.local.esimh4probe..." 2>/dev/null || true
   pm uninstall io.github.local.esimh4probe >/dev/null 2>&1
 fi
+if pm path io.github.local.esimh4tester >/dev/null 2>&1; then
+  ui_print "- 模拟写卡测试已并入主应用的「测试」标签页，正在卸载旧的独立测试应用... / Removing the old standalone tester app (now the Test tab)..." 2>/dev/null || true
+  pm uninstall io.github.local.esimh4tester >/dev/null 2>&1
+fi
+rm -f "$STATE/tester.sha256" "$STATE/tester_enabled"
 sync_apk_if_needed io.github.jabe1122.esimh4probe "$MODPATH/compat.apk" "$STATE/compat.sha256"
 refresh_lsposed_index
 read_mode
 if [ "$MODE" = on ]; then
   sync_lpa_umount_guard
-  sync_tester_on
+  sync_lpa_bridge_on
 fi
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 for script in common.sh action.sh post-fs-data.sh service.sh uninstall.sh diagnostics.sh restore.sh restore-guard.sh; do
@@ -456,7 +578,7 @@ done
 mkdir -p /data/adb/service.d
 cp "$MODPATH/restore-guard.sh" /data/adb/service.d/xiaomi-esim-h4-restore.sh
 set_perm /data/adb/service.d/xiaomi-esim-h4-restore.sh 0 0 0755
-ui_print "- 版本 / Version: v0.6.1 (601)" 2>/dev/null || true
+ui_print "- 版本 / Version: v@VERSION_NAME@ (@VERSION_CODE@)" 2>/dev/null || true
 ui_print "- 适用范围 / Scope: HyperOS 4 (SDK 35+) / SIM2 可插拔实体 eSIM (ESTKme, 小白卡, 9eSIM, Xesim 等)" 2>/dev/null || true
 ui_print "- 重要提示 / Reminder: 请在 LSPosed 中确认已勾选启用 HYPEROS4实体ESIM桥接 (io.github.jabe1122.esimh4probe)！" 2>/dev/null || true
 ui_print "- SukiSU/KernelSU 提示: 推荐使用 Hybrid Mount 或 meta-overlayfs 元模块，内置内核 umount 自动免疫。" 2>/dev/null || true
@@ -466,6 +588,10 @@ ui_print "- 原始设置已备份，不修改卡内任何现有 eSIM 配置。 /
 put('post-fs-data.sh', r'''#!/system/bin/sh
 MODDIR=${0%/*}
 . "$MODDIR/common.sh"
+ISDR_SE=auto
+[ -f "$STATE/isdr_se" ] && . "$STATE/isdr_se"
+case "$ISDR_SE" in se0|se1) ;; *) ISDR_SE=auto ;; esac
+setprop sys.xiaomi_esim_h4.isdr_se "$ISDR_SE"
 read_mode
 if [ "$MODE" = on ]; then
   rm -f "$MODDIR/skip_mount"
@@ -502,7 +628,9 @@ if [ "$MODE" = on ] && [ "$(getprop sys.xiaomi_esim_h4.active)" = 1 ]; then
     logmsg "ON: LPA system privilege mount & umount guard verified; eSIM management enabled; SIM2 activation synced."
   else
     setprop sys.xiaomi_esim_h4.active 0
-    sync_tester_on
+    sync_lpa_bridge_on
+    suspend_esim_switch
+    restore_physical_sim
     logmsg "ERROR: MODE=on but LPA system overlay is NOT mounted (mount_ok=0). Install/enable Hybrid Mount or meta-overlayfs and reboot."
   fi
 else
@@ -526,7 +654,7 @@ set_mode_off() {
   setprop sys.xiaomi_esim_h4.active 0
   setprop sys.xiaomi_esim_h4.mount_ok 0
   echo "RESULT=OFF_APPLIED"
-  logmsg "已切换为关闭。模拟测试应用与运行状态已清理还原，请重启手机以撤销底层能力声明。"
+  logmsg "已切换为关闭。运行状态已清理还原，请重启手机以撤销底层能力声明。"
 }
 
 set_mode_on() {
@@ -567,23 +695,33 @@ case "$1" in
     set_mode_off
     ;;
   umount_guard)
-    if [ "$2" = off ]; then
-      echo UMOUNT_GUARD=off > "$STATE/umount_guard"
-    else
-      echo UMOUNT_GUARD=on > "$STATE/umount_guard"
+    case "$2" in
+      on|off) ;;
+      *) echo "RESULT=ERROR"; echo "Invalid umount guard value."; exit 1 ;;
+    esac
+    read_umount_guard
+    previous_guard=$UMOUNT_GUARD
+    if ! echo "UMOUNT_GUARD=$2" > "$STATE/umount_guard"; then
+      echo "RESULT=ERROR"
+      echo "Failed to save the umount guard setting."
+      exit 1
     fi
-    sync_lpa_umount_guard
+    if ! sync_lpa_umount_guard; then
+      echo "UMOUNT_GUARD=$previous_guard" > "$STATE/umount_guard"
+      echo "RESULT=ERROR"
+      exit 1
+    fi
     echo "RESULT=OK"
     ;;
-  tester)
-    if [ "$2" = off ]; then
-      echo TESTER=off > "$STATE/tester_enabled"
-      pm uninstall io.github.local.esimh4tester >/dev/null 2>&1
-      rm -f "$STATE/tester.sha256"
-    else
-      echo TESTER=on > "$STATE/tester_enabled"
-      sync_apk_if_needed io.github.local.esimh4tester "$MODDIR/tester.apk" "$STATE/tester.sha256"
-    fi
+  isdr_se)
+    case "$2" in
+      se0|se1) sel=$2 ;;
+      *) sel=auto ;;
+    esac
+    echo "ISDR_SE=$sel" > "$STATE/isdr_se"
+    setprop sys.xiaomi_esim_h4.isdr_se "$sel"
+    am force-stop com.miui.euicc >/dev/null 2>&1
+    logmsg "ISD-R selection set to $sel (reboot to refresh EID in Settings)."
     echo "RESULT=OK"
     ;;
   *)
@@ -606,7 +744,7 @@ restore_settings
 setprop sys.xiaomi_esim_h4.active 0
 setprop sys.xiaomi_esim_h4.mount_ok 0
 reset_property
-logmsg "原有设置已还原，模拟测试应用已卸载。重启后完成卸载系统能力声明。卡内配置未修改。"
+logmsg "原有设置已还原。重启后完成卸载系统能力声明。卡内配置未修改。"
 ''')
 
 put('restore-guard.sh', r'''#!/system/bin/sh
@@ -631,7 +769,7 @@ if [ ! -d "$MODDIR" ] || [ -f "$MODDIR/disable" ] || [ -f "$MODDIR/remove" ]; th
       *) echo "$value" | grep -Eq '^-?[0-9]+$' && settings put global euicc_provisioned "$value" ;;
     esac
   fi
-  if dumpsys package com.miui.euicc 2>/dev/null | grep -Eq '(pkgFlags|flags)=\[[^]]*(^| )UPDATED_SYSTEM_APP( |$|\])'; then
+  if dumpsys package com.miui.euicc 2>/dev/null | grep -Eq '(pkgFlags|flags)=\[([[:space:]]|[^]]*[[:space:]])?UPDATED_SYSTEM_APP([[:space:]]|\])'; then
     pm uninstall-system-updates com.miui.euicc >/dev/null 2>&1 || true
   fi
   if pm list packages -3 com.miui.euicc 2>/dev/null | grep -qx 'package:com.miui.euicc'; then
@@ -649,7 +787,7 @@ if [ ! -d "$MODDIR" ] || [ -f "$MODDIR/disable" ] || [ -f "$MODDIR/remove" ]; th
       true|false) [ -n "$card_key" ] && CLASSPATH="$STATE/restore-helper.apk" app_process /system/bin io.github.local.esimh4probe.Sim2Control set "$value" "$card_key" >/dev/null 2>&1 ;;
     esac
   fi
-  for key in xiaomi_esim_h4_sim2_sub_id xiaomi_esim_h4_verified_iccid xiaomi_esim_h4_verified_eid xiaomi_esim_h4_card_type xiaomi_esim_h4_carrier_bridge xiaomi_esim_h4_lpa_uri_bridge xiaomi_esim_h4_rewrite_text; do
+  for key in xiaomi_esim_h4_sim2_sub_id xiaomi_esim_h4_verified_iccid xiaomi_esim_h4_verified_eid xiaomi_esim_h4_card_type xiaomi_esim_h4_carrier_bridge xiaomi_esim_h4_lpa_uri_bridge xiaomi_esim_h4_rewrite_text xiaomi_esim_h4_esim_suspended; do
     settings --user 0 delete secure "$key" >/dev/null
   done
   setprop sys.xiaomi_esim_h4.active 0
@@ -662,17 +800,16 @@ MODDIR=${0%/*}
 . "$MODDIR/common.sh"
 read_mode
 read_umount_guard
-read_tester_enabled
-echo "version=v0.6.1"
+echo "version=v@VERSION_NAME@"
 echo "mode=$MODE"
 echo "umount_guard=$UMOUNT_GUARD"
-echo "tester_enabled=$TESTER_ENABLED"
 echo "build=$(getprop ro.build.version.incremental)"
 echo "active=$(getprop sys.xiaomi_esim_h4.active)"
 echo "mount_ok=$(getprop sys.xiaomi_esim_h4.mount_ok)"
 echo "property=$(getprop ro.vendor.miui.support_esim)"
 echo "secure=$(settings --user 0 get secure is_enable_esim_for_user)"
 echo "card_type=$(settings --user 0 get secure xiaomi_esim_h4_card_type)"
+echo "esim_suspended=$(settings --user 0 get secure xiaomi_esim_h4_esim_suspended)"
 echo "lpa_overlay_apk=$([ -f /product/priv-app/MIUIEsimLPA/MIUIEsimLPA.apk ] && echo true || echo false)"
 echo "lpa_priv_xml=$([ -f /product/etc/permissions/privapp-permissions-euicc.xml ] && echo true || echo false)"
 echo "lpa_system_pkg=$(is_lpa_system_pkg && echo true || echo false)"
@@ -681,7 +818,6 @@ echo "metamodule=$([ -e /data/adb/metamodule ] && echo present || echo absent)"
 pm list features | grep telephony.euicc
 pm path com.miui.euicc
 pm path io.github.jabe1122.esimh4probe
-pm path io.github.local.esimh4tester
 service list | grep -i euicc
 echo "sim_state=$(getprop gsm.sim.state)"
 ''')
@@ -706,9 +842,8 @@ lpa_target = MOD / 'system/product/priv-app/MIUIEsimLPA/MIUIEsimLPA.apk'
 lpa_target.parent.mkdir(parents=True, exist_ok=True)
 shutil.copy2(PREBUILT_LPA, lpa_target)
 shutil.copy2(COMPAT_APK, MOD / 'compat.apk')
-shutil.copy2(TESTER_APK, MOD / 'tester.apk')
 
-zip_path = OUT / 'XiaomiEsimLPA-HyperOS4-v0.6.1.zip'
+zip_path = OUT / f'XiaomiEsimLPA-HyperOS4-v{VERSION_NAME}.zip'
 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
     for p in sorted(MOD.rglob('*')):
         if p.is_file():

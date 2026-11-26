@@ -1,0 +1,41 @@
+# Versions follow the compose-miuix-ui/miuix main branch (AGP, Kotlin). To update Miuix, change
+# `miuix` and, if its release notes ask for it, `agp` and `kotlin` (the Compose compiler plugin
+# always uses the Kotlin version). Compose itself comes in through Miuix, so there is no Compose
+# BOM here that could pin it to an older release.
+[versions]
+# Miuix sets the minimum compile SDK in its AAR metadata (minCompileSdk / minCompileMinorSdk).
+# targetSdk stays in the module build files: raising it changes runtime behavior.
+compileSdk = "37"
+compileSdkMinor = "2"
+agp = "9.5.2"
+kotlin = "2.4.21"
+miuix = "0.9.5-beta03"
+androidx-activity = "1.13.0"
+libxposed-api = "101.0.1"
+# Open source licenses page: the plugin collects the dependencies and their licenses at build time
+aboutlibraries = "15.3.0"
+
+[libraries]
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activity" }
+miuix-ui = { module = "top.yukonga.miuix.kmp:miuix-ui-android", version.ref = "miuix" }
+miuix-icons = { module = "top.yukonga.miuix.kmp:miuix-icons-android", version.ref = "miuix" }
+miuix-preference = { module = "top.yukonga.miuix.kmp:miuix-preference-android", version.ref = "miuix" }
+miuix-blur = { module = "top.yukonga.miuix.kmp:miuix-blur-android", version.ref = "miuix" }
+miuix-glass = { module = "top.yukonga.miuix.kmp:miuix-glass-android", version.ref = "miuix" }
+miuix-glass-icons = { module = "top.yukonga.miuix.kmp:miuix-glass-icons-android", version.ref = "miuix" }
+miuix-nav = { module = "top.yukonga.miuix.kmp:miuix-nav-android", version.ref = "miuix" }
+libxposed-api = { module = "io.github.libxposed:api", version.ref = "libxposed-api" }
+aboutlibraries-core = { module = "com.mikepenz:aboutlibraries-core", version.ref = "aboutlibraries" }
+
+[bundles]
+miuix = ["miuix-ui", "miuix-icons", "miuix-preference", "miuix-blur", "miuix-glass", "miuix-glass-icons", "miuix-nav"]
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+# AGP 9 compiles Kotlin itself (built-in Kotlin), so modules never apply this plugin. Declaring it
+# at the root only puts this Kotlin version on the build classpath instead of AGP's bundled one.
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+# Generates res/raw/aboutlibraries.json as part of the Android build
+aboutlibraries-android = { id = "com.mikepenz.aboutlibraries.plugin.android", version.ref = "aboutlibraries" }

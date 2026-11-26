@@ -70,7 +70,16 @@ public final class CompatModule extends XposedModule {
     private static final ThreadLocal<Boolean> IN_GET_CARDS = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<Boolean> IN_DIRECT_RIL = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<Boolean> IN_RAW_PORT_CHECK = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<Boolean> IN_NATIVE_RESTORE = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final long NATIVE_RESTORE_WINDOW_MS = 5000L;
     private static final Method CURRENT_APP_METHOD;
+
+    // Native Xiaomi eSIM manager entry used to put the modem back to [PHYSICAL, PHYSICAL]
+    // (MiuiEsimManagerBase.setEsimState(1) -> QTI setSimType) when SIM2 is pulled while bridged.
+    private static volatile Class<?> esimBaseClass;
+    private static volatile Method nativeSetEsimState;
+    private static volatile Object esimManagerInstance;
+    private static volatile long nativeRestoreUntil = 0L;
 
     static {
         Method m = null;
@@ -141,6 +150,75 @@ public final class CompatModule extends XposedModule {
                 curr = curr.getSuperclass();
             }
         }
+        return null;
+    }
+
+    private static boolean inNativeRestore() {
+        return IN_NATIVE_RESTORE.get() || SystemClock.elapsedRealtime() < nativeRestoreUntil;
+    }
+
+    private static void rememberEsimManager(Object thiz) {
+        Class<?> base = esimBaseClass;
+        if (thiz != null && esimManagerInstance == null && base != null && base.isInstance(thiz)) {
+            esimManagerInstance = thiz;
+        }
+    }
+
+    private static Object resolveEsimManager() {
+        Object inst = esimManagerInstance;
+        if (inst != null) return inst;
+        Class<?> base = esimBaseClass;
+        if (base == null) return null;
+        try {
+            Method getInstance = base.getDeclaredMethod("getInstance");
+            if (Modifier.isStatic(getInstance.getModifiers())) {
+                getInstance.setAccessible(true);
+                inst = getInstance.invoke(null);
+                if (inst != null) esimManagerInstance = inst;
+            }
+        } catch (Throwable ignored) {
+        }
+        return inst;
+    }
+
+    /**
+     * Fail-safe: asks the native Xiaomi eSIM manager to select the physical card on both slots
+     * (setEsimState(1) -> QTI setSimType([PHYSICAL, PHYSICAL])), bypassing this module's hooks.
+     * Used when SIM2 is removed while the bridge is active, so the modem cannot stay on the
+     * soldered eSIM and leave SIM2 reporting ABSENT / NO_ATR after the card is reinserted.
+     *
+     * @return the native result (0 on success), or -1 if the native path is unavailable
+     */
+    static int restoreNativePhysicalSim(String reason) {
+        Method method = nativeSetEsimState;
+        Object inst = method != null && Modifier.isStatic(method.getModifiers()) ? null : resolveEsimManager();
+        if (method == null || (inst == null && !Modifier.isStatic(method.getModifiers()))) {
+            Log.w(TAG, "physical SIM restore unavailable (" + reason + "): native eSIM manager not resolved");
+            return -1;
+        }
+        boolean prev = IN_NATIVE_RESTORE.get();
+        IN_NATIVE_RESTORE.set(true);
+        nativeRestoreUntil = SystemClock.elapsedRealtime() + NATIVE_RESTORE_WINDOW_MS;
+        long token = Binder.clearCallingIdentity();
+        try {
+            Object rc = method.invoke(inst, 1);
+            int result = rc instanceof Integer ? (Integer) rc : -1;
+            Log.i(TAG, "physical SIM restore (" + reason + "): native setEsimState(1) returned " + result);
+            return result;
+        } catch (Throwable t) {
+            Throwable cause = t.getCause() != null ? t.getCause() : t;
+            Log.w(TAG, "physical SIM restore failed (" + reason + "): " + cause.getClass().getSimpleName());
+            return -1;
+        } finally {
+            Binder.restoreCallingIdentity(token);
+            IN_NATIVE_RESTORE.set(prev);
+        }
+    }
+
+    private static Object defaultReturn(Class<?> type) {
+        if (type == int.class) return -1;
+        if (type == boolean.class) return false;
+        if (type == long.class) return -1L;
         return null;
     }
 
@@ -319,6 +397,8 @@ public final class CompatModule extends XposedModule {
         } catch (Throwable ignored) {
         }
         final Field phoneCtxField = mContextField;
+        esimBaseClass = baseClass;
+        CardTypeGuard.setPhysicalRestorer(CompatModule::restoreNativePhysicalSim);
 
         hook(Instrumentation.class.getDeclaredMethod("callApplicationOnCreate", Application.class)).intercept(chain -> {
             Object result = chain.proceed();
@@ -410,7 +490,8 @@ public final class CompatModule extends XposedModule {
                         && method.getParameterCount() == 0 && method.getReturnType() == boolean.class) {
                     final boolean checkActiveState = "isEsimActive".equals(mName);
                     hook(method).intercept(chain -> {
-                        if (!active()) return chain.proceed();
+                        rememberEsimManager(chain.getThisObject());
+                        if (!active() || inNativeRestore()) return chain.proceed();
                         Context ctx = resolvePhoneContext(phoneCtxField);
                         if (ctx == null || !CardTypeGuard.isEuicc(ctx)) return false;
                         if (!checkActiveState) return true;
@@ -436,8 +517,13 @@ public final class CompatModule extends XposedModule {
                         && method.getParameterCount() == 1
                         && method.getParameterTypes()[0] == int.class
                         && method.getReturnType() == int.class) {
+                    if (nativeSetEsimState == null || method.getDeclaringClass() == baseClass) {
+                        method.setAccessible(true);
+                        nativeSetEsimState = method;
+                    }
                     hook(method).intercept(chain -> {
-                        if (!active()) return chain.proceed();
+                        rememberEsimManager(chain.getThisObject());
+                        if (!active() || IN_NATIVE_RESTORE.get()) return chain.proceed();
                         int state = (int) chain.getArg(0);
                         if (state != 0 && state != 1) return chain.proceed();
                         Context ctx = resolvePhoneContext(phoneCtxField);
@@ -445,11 +531,48 @@ public final class CompatModule extends XposedModule {
                     });
                 } else if ("getEsimGPIOState".equals(mName) && method.getParameterCount() == 0) {
                     hook(method).intercept(chain -> {
-                        if (!active()) return chain.proceed();
+                        rememberEsimManager(chain.getThisObject());
+                        if (!active() || inNativeRestore()) return chain.proceed();
                         Context ctx = resolvePhoneContext(phoneCtxField);
                         return ctx != null && Settings.Secure.getInt(ctx.getContentResolver(), CardTypeGuard.KEY_ENABLE_ESIM, 0) == 1 ? 0 : 1;
                     });
                 }
+            }
+        }
+
+        // Fail-safe for hot removal: Xiaomi's native code can call the QTI layer directly
+        // (QcMiuiEsimManager$QcAidlEsimInner.setEsimStateEx(0) -> setSimType([PHYSICAL, ESIM]))
+        // when SIM2 disappears while is_enable_esim_for_user=1, bypassing setEsimState. While the
+        // bridge is active, never let the modem switch SIM2 to the soldered eSIM.
+        String[] exClasses = {
+            "QcMiuiEsimManager",
+            "QcMiuiEsimManager$QcAidlEsimInner",
+            "QcMiuiEsimManagerEx",
+            "QcMiuiEsimManagerEx$QcAidlEsimInner"
+        };
+        for (String simpleName : exClasses) {
+            Class<?> type;
+            try {
+                type = loader.loadClass("com.android.phone." + simpleName);
+            } catch (ClassNotFoundException e) {
+                continue;
+            }
+            for (Method method : type.getDeclaredMethods()) {
+                if (!"setEsimStateEx".equals(method.getName())
+                        || method.getParameterCount() != 1
+                        || method.getParameterTypes()[0] != int.class
+                        || Modifier.isAbstract(method.getModifiers())
+                        || !hookedMethods.add(method)) {
+                    continue;
+                }
+                final Class<?> retType = method.getReturnType();
+                hook(method).intercept(chain -> {
+                    if (!active()) return chain.proceed();
+                    int state = (int) chain.getArg(0);
+                    if (state != 0) return chain.proceed();
+                    Log.w(TAG, "blocked native setEsimStateEx(0): soldered eSIM selection is isolated while SIM2 bridge is active");
+                    return defaultReturn(retType);
+                });
             }
         }
 
@@ -674,6 +797,14 @@ public final class CompatModule extends XposedModule {
                                 out.putBoolean("ok", false);
                                 out.putString("error", "invalid_key");
                             }
+                            return out;
+                        }
+                        if ("restore_physical".equals(subcmd)) {
+                            // Allowed even when the module is inactive: scripts call it while
+                            // turning the bridge off so the modem is left on [PHYSICAL, PHYSICAL].
+                            int rc = restoreNativePhysicalSim("ctrl");
+                            out.putBoolean("ok", rc == 0);
+                            out.putInt("rc", rc);
                             return out;
                         }
                         if ("reprobe".equals(subcmd)) {
@@ -1047,25 +1178,42 @@ public final class CompatModule extends XposedModule {
 
         hook(openChMethod).intercept(chain -> {
             if (!active() || IN_DIRECT_RIL.get() || (int) chain.getArg(0) != 1) return chain.proceed();
-            Object result = null;
-            try {
-                result = chain.proceed();
-            } catch (Throwable rilOpenErr) {
-                Log.w(TAG, "RIL open channel threw " + rilOpenErr.getClass().getSimpleName() + "; falling back to OMAPI");
-            }
-            if (result != null) {
-                int status = OmapiBridge.getResponseStatus(result);
-                if (status == EuiccCardReader.RIL_STATUS_NO_ERROR) {
-                    int chId = OmapiBridge.getResponseChannel(result);
-                    if (chId >= 0) {
-                        OmapiBridge.onRilOpen(chId);
-                        return result;
-                    }
-                } else if (status == EuiccCardReader.RIL_STATUS_NO_SUCH_ELEMENT) {
-                    return result;
+            String reqAid = (String) chain.getArg(1);
+            boolean isdr = EuiccCardReader.isStandardIsdrAid(reqAid);
+            String[] aids = isdr ? EuiccCardReader.isdrAidOrder() : new String[]{reqAid};
+            Object result = null;        // first non-NO_SUCH_ELEMENT failure, passed to OMAPI fallback
+            Object noSuchResult = null;  // last NO_SUCH_ELEMENT response
+            boolean otherFailure = false;
+            for (String aid : aids) {
+                Object r = null;
+                try {
+                    Object[] a = chain.getArgs().toArray();
+                    a[1] = aid;
+                    r = chain.proceed(a);
+                } catch (Throwable rilOpenErr) {
+                    Log.w(TAG, "RIL open channel threw " + rilOpenErr.getClass().getSimpleName() + "; trying next AID / OMAPI");
                 }
+                if (r != null) {
+                    int status = OmapiBridge.getResponseStatus(r);
+                    if (status == EuiccCardReader.RIL_STATUS_NO_ERROR) {
+                        int chId = OmapiBridge.getResponseChannel(r);
+                        if (chId >= 0) {
+                            OmapiBridge.onRilOpen(chId);
+                            if (isdr) EuiccCardReader.rememberIsdrAid(aid);
+                            return r;
+                        }
+                    } else if (status == EuiccCardReader.RIL_STATUS_NO_SUCH_ELEMENT) {
+                        noSuchResult = r;
+                        continue;
+                    }
+                }
+                otherFailure = true;
+                if (result == null) result = r;
             }
-            return OmapiBridge.openSafe((String) chain.getArg(1), (int) chain.getArg(2), result);
+            if (!otherFailure && noSuchResult != null) {
+                return noSuchResult;
+            }
+            return OmapiBridge.openSafe(reqAid, (int) chain.getArg(2), result);
         });
 
         final boolean closeReturnsBoolean = (closeChMethod.getReturnType() == boolean.class);
@@ -1148,7 +1296,11 @@ public final class CompatModule extends XposedModule {
                         try {
                             Context appCtx = (Context) getAppCtx.invoke(null);
                             if (appCtx != null) {
-                                Toast.makeText(appCtx, "【安全拦截】小米写卡页已成功接收模拟 LPA 激活码，未向实体卡写入测试数据", Toast.LENGTH_LONG).show();
+                                // Resolve module strings from its APK, using the LPA UI language.
+                                Context moduleCtx = appCtx.createPackageContext(MODULE_PKG, 0)
+                                        .createConfigurationContext(appCtx.getResources().getConfiguration());
+                                Toast.makeText(appCtx, moduleCtx.getString(R.string.tester_mock_uri_intercepted),
+                                        Toast.LENGTH_LONG).show();
                             }
                         } catch (Throwable ignored) {
                         }
@@ -1375,7 +1527,31 @@ public final class CompatModule extends XposedModule {
             return sim2;
         }
 
+        /**
+         * Opens an OMAPI channel on SIM2. A request for the standard ISD-R AID also tries vendor
+         * ISD-R AIDs (eSTK.me, 5ber, ...); NoSuchElementException is thrown only if none exists.
+         */
         static synchronized Object open(String aid, int p2) throws Exception {
+            if (!EuiccCardReader.isStandardIsdrAid(aid)) {
+                return openExact(aid, p2);
+            }
+            Exception otherErr = null;
+            for (String candidate : EuiccCardReader.isdrAidOrder()) {
+                try {
+                    Object resp = openExact(candidate, p2);
+                    EuiccCardReader.rememberIsdrAid(candidate);
+                    return resp;
+                } catch (Exception e) {
+                    if (!(EuiccCardReader.unwrap(e) instanceof NoSuchElementException) && otherErr == null) {
+                        otherErr = e;
+                    }
+                }
+            }
+            if (otherErr != null) throw otherErr;
+            throw new NoSuchElementException("ISD-R AID not found on SIM2 via OMAPI (standard and vendor AIDs)");
+        }
+
+        private static Object openExact(String aid, int p2) throws Exception {
             Reader sim2 = getSim2Reader();
             Session session = sim2.openSession();
             Channel channel = null;

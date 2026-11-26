@@ -23,6 +23,8 @@ local.properties
 .vscode/
 
 # Build artifacts & packages
+# About page data, written by .github/scripts/about_info.sh in the nightly workflow
+probe/app/src/main/assets/about/
 module/
 dist/
 bin/

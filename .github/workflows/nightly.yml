@@ -1,0 +1,344 @@
+name: Nightly Build
+
+# Builds the signed, R8-minified release compat APKs (universal, arm64-v8a and
+# armeabi-v7a splits) and the flashable module, and uploads each of them as a workflow artifact, together
+# with the R8 mapping file that decodes their stack traces. The run summary
+# lists their SHA-256 checksums.
+#
+# - The scheduled run builds main once a day, and skips when main has no new
+#   commits since the last nightly artifacts were uploaded.
+# - Running the workflow by hand always builds the branch it runs on. Tick
+#   "Build debug APKs" to build the debug APKs instead (not minified, so there
+#   is no mapping file). Debug builds are not counted as nightlies when the
+#   scheduled run checks for new commits.
+#
+# Secrets:
+# - SIGNING_KEYSTORE_BASE64: the keystore (.jks), base64-encoded
+# - SIGNING_STORE_PASSWORD, SIGNING_KEY_ALIAS, SIGNING_KEY_PASSWORD
+# - SERVERCHAN_SENDKEY (optional): a ServerChan3 send key (sctp...)
+
+on:
+  workflow_call:
+    inputs:
+      debug:
+        type: boolean
+        default: false
+      release:
+        description: Build stable artifacts with the project version code
+        type: boolean
+        default: false
+    secrets:
+      SIGNING_KEYSTORE_BASE64:
+        required: true
+      SIGNING_STORE_PASSWORD:
+        required: true
+      SIGNING_KEY_ALIAS:
+        required: true
+      SIGNING_KEY_PASSWORD:
+        required: true
+      SERVERCHAN_SENDKEY:
+        required: false
+  release:
+    types: [published]
+  push:
+    branches:
+      - main
+      - feat/*
+  schedule:
+    - cron: "0 3 * * *" # 每天 3:00（哥本哈根时间）构建一次
+      timezone: "Europe/Copenhagen"
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: Build debug APKs instead of the R8-minified release APKs
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}-${{ inputs.release || github.event_name == 'release' }}
+  cancel-in-progress: false
+
+env:
+  # AGP 9.5 needs Gradle 9; this is the version the Miuix main branch uses
+  GRADLE_VERSION: "9.9.2"
+  MODULE_PREFIX: XiaomiEsimLPA-HyperOS4-
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    env:
+      # Scheduled runs have no inputs, so they always build the release
+      BUILD_TYPE: ${{ inputs.debug && 'debug' || 'release' }}
+      RELEASE_BUILD: ${{ inputs.release || github.event_name == 'release' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # The summary lists the commits since the previous nightly
+          fetch-depth: 0
+
+      - name: Check for new commits
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The newest module artifact that has not expired marks the previous nightly
+          previous="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --jq '
+            [.artifacts[]
+              | select((.expired | not) and (.name | startswith(env.MODULE_PREFIX)) and (.name | contains("-nightly.")))]
+            | first | .workflow_run.head_sha // ""')"
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ "$previous" = "$GITHUB_SHA" ]; then
+            echo "The last nightly already builds ${GITHUB_SHA:0:7}; skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipped: the last nightly already builds \`${GITHUB_SHA:0:7}\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set nightly build number
+        if: steps.check.outputs.skip == 'false' && env.RELEASE_BUILD != 'true'
+        run: echo "BUILD_VERSION_CODE=$((600 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 21
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        if: steps.check.outputs.skip == 'false'
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Restore signing key
+        if: steps.check.outputs.skip == 'false'
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          # A nightly signed with a random debug key could not update an installed build
+          for name in SIGNING_KEYSTORE_BASE64 SIGNING_STORE_PASSWORD SIGNING_KEY_ALIAS SIGNING_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error title=Signing key missing::Set the $name secret."
+              exit 1
+            fi
+          done
+          keystore="$RUNNER_TEMP/signing.jks"
+          base64 -d <<< "$SIGNING_KEYSTORE_BASE64" > "$keystore"
+          echo "SIGNING_STORE_FILE=$keystore" >> "$GITHUB_ENV"
+
+      - name: Write About page data
+        if: steps.check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The repository (fork or original), the commit and the contributors with their avatars
+        run: .github/scripts/about_info.sh
+
+      - name: Build APKs
+        id: build
+        if: steps.check.outputs.skip == 'false'
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          gradle -p probe --no-daemon clean "assemble${BUILD_TYPE^}"
+
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)apksigner"
+          for apk in probe/app/build/outputs/apk/"$BUILD_TYPE"/*-{universal,arm64-v8a,armeabi-v7a}-"$BUILD_TYPE".apk; do
+            certs="$("$apksigner" verify --print-certs "$apk")"
+            if grep -q "CN=Android Debug" <<< "$certs"; then
+              echo "::error title=Wrong signing key::$apk is signed with the debug key."
+              exit 1
+            fi
+            cert="$(sed -n 's/.*certificate SHA-256 digest: //p' <<< "$certs" | head -n 1)"
+            echo "$apk: $cert"
+          done
+          echo "cert=$cert" >> "$GITHUB_OUTPUT"
+
+          metadata="probe/app/build/outputs/apk/$BUILD_TYPE/output-metadata.json"
+          version="$(jq -r '.elements[0].versionName' "$metadata")"
+          code="$(jq -r '.elements[0].versionCode' "$metadata")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Debug and stable artifacts are excluded from nightly update checks.
+          suffix="nightly"
+          [ "$BUILD_TYPE" = "debug" ] && suffix="nightly-debug"
+          [ "$RELEASE_BUILD" = "true" ] && suffix="stable"
+          echo "name=v${version}-${suffix}.${code}" >> "$GITHUB_OUTPUT"
+
+      - name: Package module
+        id: package
+        if: steps.check.outputs.skip == 'false'
+        env:
+          NAME: ${{ steps.build.outputs.name }}
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          out="$RUNNER_TEMP/out"
+          dist="$RUNNER_TEMP/dist"
+          if [ "$BUILD_TYPE" = "debug" ]; then
+            python3 build_module.py --output-dir "$out" --debug
+          else
+            python3 build_module.py --output-dir "$out"
+          fi
+          mkdir -p "$dist"
+          module="$dist/${MODULE_PREFIX}${NAME}.zip"
+          cp "$out/${MODULE_PREFIX}v${VERSION}.zip" "$module"
+          echo "module=$module" >> "$GITHUB_OUTPUT"
+          # Gradle splits the APKs by ABI
+          for abi in universal arm64-v8a armeabi-v7a; do
+            file="$dist/Xiaomi-eSIM-Compat-${NAME}-${abi}.apk"
+            cp "probe/app/build/outputs/apk/$BUILD_TYPE/app-$abi-$BUILD_TYPE.apk" "$file"
+            echo "compat_${abi//-/_}=$file" >> "$GITHUB_OUTPUT"
+          done
+
+          # R8 mapping files, to decode stack traces (retrace) from a release build
+          if [ "$BUILD_TYPE" = "release" ]; then
+            mapping="$dist/Xiaomi-eSIM-mapping-${NAME}.zip"
+            staging="$RUNNER_TEMP/mapping"
+            mkdir -p "$staging/compat"
+            cp probe/app/build/outputs/mapping/release/mapping.txt "$staging/compat/"
+            (cd "$staging" && zip -qr "$mapping" compat)
+            echo "mapping=$mapping" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload module
+        id: upload-module
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: ${{ steps.package.outputs.module }}
+          if-no-files-found: error
+
+      - name: Upload compat APK (universal)
+        id: upload-compat-universal
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: ${{ steps.package.outputs.compat_universal }}
+          if-no-files-found: error
+
+      - name: Upload compat APK (arm64-v8a)
+        id: upload-compat-arm64-v8a
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: ${{ steps.package.outputs.compat_arm64_v8a }}
+          if-no-files-found: error
+
+      - name: Upload compat APK (armeabi-v7a)
+        id: upload-compat-armeabi-v7a
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: ${{ steps.package.outputs.compat_armeabi_v7a }}
+          if-no-files-found: error
+
+      - name: Upload R8 mapping
+        id: upload-mapping
+        if: steps.check.outputs.skip == 'false' && env.BUILD_TYPE == 'release'
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: ${{ steps.package.outputs.mapping }}
+          if-no-files-found: error
+
+      - name: Write summary
+        if: steps.check.outputs.skip == 'false'
+        env:
+          NAME: ${{ steps.build.outputs.name }}
+          CERT: ${{ steps.build.outputs.cert }}
+          PREVIOUS: ${{ steps.check.outputs.previous }}
+          MODULE: ${{ steps.package.outputs.module }}
+          COMPAT_UNIVERSAL: ${{ steps.package.outputs.compat_universal }}
+          COMPAT_ARM64: ${{ steps.package.outputs.compat_arm64_v8a }}
+          COMPAT_ARMV7: ${{ steps.package.outputs.compat_armeabi_v7a }}
+          MAPPING: ${{ steps.package.outputs.mapping }}
+          MODULE_URL: ${{ steps.upload-module.outputs.artifact-url }}
+          COMPAT_UNIVERSAL_URL: ${{ steps.upload-compat-universal.outputs.artifact-url }}
+          COMPAT_ARM64_URL: ${{ steps.upload-compat-arm64-v8a.outputs.artifact-url }}
+          COMPAT_ARMV7_URL: ${{ steps.upload-compat-armeabi-v7a.outputs.artifact-url }}
+          MAPPING_URL: ${{ steps.upload-mapping.outputs.artifact-url }}
+        run: |
+          row() {
+            printf '| [%s](%s) | %s | `%s` |\n' "$(basename "$1")" "$2" "$(du -h "$1" | cut -f 1)" "$(sha256sum "$1" | cut -d ' ' -f 1)"
+          }
+          {
+            echo "## Build $NAME"
+            echo
+            echo "Built from \`${GITHUB_REF_NAME}\` at \`${GITHUB_SHA:0:7}\`."
+            echo
+            echo "| File | Size | SHA-256 |"
+            echo "| --- | --- | --- |"
+            row "$MODULE" "$MODULE_URL"
+            row "$COMPAT_UNIVERSAL" "$COMPAT_UNIVERSAL_URL"
+            row "$COMPAT_ARM64" "$COMPAT_ARM64_URL"
+            row "$COMPAT_ARMV7" "$COMPAT_ARMV7_URL"
+            if [ -n "$MAPPING" ]; then
+              row "$MAPPING" "$MAPPING_URL"
+              echo
+              echo "The APKs are R8-minified release builds. Decode their stack traces with the mapping zip (\`retrace compat/mapping.txt stacktrace.txt\`)."
+            else
+              echo
+              echo "The APKs are **debug builds** (not minified), built by hand. They are not counted as nightlies."
+            fi
+            echo
+            echo "APK signing certificate SHA-256: \`$CERT\`"
+            if [ -n "$PREVIOUS" ] && [ "$PREVIOUS" != "$GITHUB_SHA" ] && git merge-base --is-ancestor "$PREVIOUS" HEAD 2>/dev/null; then
+              echo
+              echo "### Changes since the previous nightly (${PREVIOUS:0:7})"
+              echo
+              git log --no-merges --format='- %s (%h)' -n 50 "$PREVIOUS..HEAD"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send ServerChan push
+        # Push when the nightly was uploaded or the run failed, not when it was skipped
+        if: ${{ !cancelled() && (failure() || steps.upload-compat-armeabi-v7a.outcome == 'success') }}
+        env:
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+          JOB_STATUS: ${{ job.status }}
+          NAME: ${{ steps.build.outputs.name }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload-compat-armeabi-v7a.outcome }}
+          MAPPING_OUTCOME: ${{ steps.upload-mapping.outcome }}
+        run: |
+          repo="${GITHUB_REPOSITORY#*/}"
+          if [ "$JOB_STATUS" = "success" ]; then
+            export TITLE="eSIM LPA nightly built"
+            export SHORT="$repo: Built $NAME"
+          else
+            export TITLE="eSIM LPA nightly failed"
+            if [ "$BUILD_OUTCOME" = "failure" ]; then
+              export SHORT="$repo: Could not build the APKs"
+            elif [ "$PACKAGE_OUTCOME" = "failure" ]; then
+              export SHORT="$repo: Could not package the module"
+            elif [ "$UPLOAD_OUTCOME" != "success" ] || [ "$MAPPING_OUTCOME" = "failure" ]; then
+              export SHORT="$repo: Could not upload the artifacts"
+            else
+              export SHORT="$repo: The nightly workflow failed"
+            fi
+          fi
+          export DESP="- Build: \`${NAME:-unknown}\` ($BUILD_TYPE)
+          - Commit: \`${GITHUB_SHA:0:7}\` on \`$GITHUB_REF_NAME\`
+          - Trigger: \`$GITHUB_EVENT_NAME\`
+          - APKs: \`${BUILD_OUTCOME:-skipped}\`
+          - Module: \`${PACKAGE_OUTCOME:-skipped}\`
+          - Upload: \`${UPLOAD_OUTCOME:-skipped}\`"
+          if [ "$JOB_STATUS" = "success" ]; then
+            DESP+=$'\n\n'"[Download the artifacts](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}#artifacts)"
+          fi
+          .github/scripts/serverchan.sh
